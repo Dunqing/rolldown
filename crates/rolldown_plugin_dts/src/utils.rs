@@ -42,14 +42,29 @@ pub fn is_dts_virtual_id(id: &str) -> bool {
   id.starts_with("\0dts:")
 }
 
+/// Extract the real `.d.ts` path from a virtual DTS module ID.
+/// Returns the path without the `\0dts:` prefix, or the original if not virtual.
+pub fn virtual_id_to_dts_path(id: &str) -> &str {
+  id.strip_prefix("\0dts:").unwrap_or(id)
+}
+
+/// Convert a `.d.ts` path back to its original `.ts` source path.
+/// e.g., `foo.d.ts` -> `foo.ts`, `bar.d.mts` -> `bar.mts`
+pub fn dts_to_source(id: &str) -> String {
+  if let Some(stripped) = id.strip_suffix(".d.ts") {
+    format!("{stripped}.ts")
+  } else if let Some(stripped) = id.strip_suffix(".d.mts") {
+    format!("{stripped}.mts")
+  } else if let Some(stripped) = id.strip_suffix(".d.cts") {
+    format!("{stripped}.cts")
+  } else {
+    id.to_string()
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
-
-  /// Extract the real `.d.ts` path from a virtual DTS module ID.
-  fn virtual_id_to_dts_path(id: &str) -> &str {
-    id.strip_prefix("\0dts:").unwrap_or(id)
-  }
 
   /// Convert a `.d.ts` import path to its `.js` counterpart for output.
   /// e.g., `./foo.d.ts` -> `./foo.js`

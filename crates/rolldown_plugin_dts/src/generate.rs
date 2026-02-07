@@ -15,7 +15,10 @@ use rolldown_plugin::{
 
 use crate::fake_js;
 use crate::options::DtsPluginOptions;
-use crate::utils::{is_dts, is_dts_virtual_id, is_ts_source, make_dts_virtual_id, source_to_dts};
+use crate::utils::{
+  dts_to_source, is_dts, is_dts_virtual_id, is_ts_source, make_dts_virtual_id, source_to_dts,
+  virtual_id_to_dts_path,
+};
 
 /// Check if the code contains fake DTS variable declarations.
 /// Looks for patterns indicating our fake JS format, which may be reformatted across lines.
@@ -139,15 +142,15 @@ impl Plugin for DtsPlugin {
     if is_ts_source(id) {
       let virtual_id = make_dts_virtual_id(id);
 
-      // Store the source for later .d.ts generation
-      self.dts_map.insert(
-        virtual_id.clone(),
-        DtsModule {
-          code: args.code.clone(),
-          source_id: id.to_string(),
-          is_entry: true, // TODO: detect actual entry status
-        },
-      );
+      // Store the source with BOTH the virtual ID and source path as keys
+      // This ensures we can find it regardless of how it's looked up
+      let module = DtsModule {
+        code: args.code.clone(),
+        source_id: id.to_string(),
+        is_entry: true, // TODO: detect actual entry status
+      };
+      self.dts_map.insert(virtual_id.clone(), module.clone());
+      self.dts_map.insert(id.to_string(), module);
 
       // Extract base name from the source file (e.g., "main" from "main.ts")
       let entry_name =
@@ -210,6 +213,16 @@ impl Plugin for DtsPlugin {
       let in_dts_context = is_dts(importer) || is_dts_virtual_id(importer);
 
       if in_dts_context {
+        // Get the real importer path for resolution
+        // - For virtual IDs (\0dts:/path/to/file.d.ts), use the source file (/path/to/file.ts)
+        // - For real .d.ts files, use the .d.ts file directly
+        let real_importer = if is_dts_virtual_id(importer) {
+          let dts_path = virtual_id_to_dts_path(importer);
+          dts_to_source(dts_path)
+        } else {
+          importer.to_string()
+        };
+
         // If specifier is a .ts file, resolve to its .d.ts counterpart
         if is_ts_source(specifier) {
           let virtual_id = make_dts_virtual_id(specifier);
@@ -234,19 +247,43 @@ impl Plugin for DtsPlugin {
         let is_extensionless =
           specifier.starts_with('.') && !specifier.rsplit('/').next().unwrap_or("").contains('.');
         if is_extensionless {
-          // First, try the normal resolver
-          if let Ok(Ok(resolved)) = ctx.resolve(specifier, Some(importer), None).await {
+          // First, try the normal resolver with the source importer path
+          if let Ok(Ok(resolved)) = ctx.resolve(specifier, Some(&real_importer), None).await {
+            // If resolved to a .ts file, convert to virtual DTS ID
+            let resolved_id = resolved.id.into_inner();
+            if is_ts_source(&resolved_id) {
+              let virtual_id = make_dts_virtual_id(&resolved_id);
+              return Ok(Some(rolldown_plugin::HookResolveIdOutput {
+                id: ArcStr::from(virtual_id),
+                side_effects: Some(HookSideEffects::False),
+                ..Default::default()
+              }));
+            }
             return Ok(Some(rolldown_plugin::HookResolveIdOutput {
-              id: resolved.id.into_inner(),
+              id: resolved_id,
               side_effects: Some(HookSideEffects::False),
               ..Default::default()
             }));
           }
 
-          // If normal resolution fails, compute absolute path with .d.ts extension
+          // If normal resolution fails, compute absolute path
           let importer_dir =
-            std::path::Path::new(importer).parent().unwrap_or(std::path::Path::new("."));
-          let dts_path = importer_dir.join(format!("{}.d.ts", &specifier[2..])); // strip "./"
+            std::path::Path::new(&real_importer).parent().unwrap_or(std::path::Path::new("."));
+          let base_name = &specifier[2..]; // strip "./"
+
+          // For virtual DTS importers, resolve to virtual DTS ID
+          // For real .d.ts importers, resolve to .d.ts file
+          if is_dts_virtual_id(importer) {
+            let ts_path = importer_dir.join(format!("{base_name}.ts"));
+            let virtual_id = make_dts_virtual_id(&ts_path.to_string_lossy());
+            return Ok(Some(rolldown_plugin::HookResolveIdOutput {
+              id: ArcStr::from(virtual_id),
+              side_effects: Some(HookSideEffects::False),
+              ..Default::default()
+            }));
+          }
+          // Real .d.ts file, resolve to .d.ts
+          let dts_path = importer_dir.join(format!("{base_name}.d.ts"));
           return Ok(Some(rolldown_plugin::HookResolveIdOutput {
             id: ArcStr::from(dts_path.to_string_lossy().to_string()),
             side_effects: Some(HookSideEffects::False),
@@ -276,7 +313,13 @@ impl Plugin for DtsPlugin {
     }
 
     // Look up the captured source module
-    let dts_module = self.dts_map.get(id).map(|entry| entry.clone());
+    // Try virtual ID first, then try converting to source path
+    let dts_module = self.dts_map.get(id).map(|entry| entry.clone()).or_else(|| {
+      // Convert virtual ID to source path and try again
+      let dts_path = virtual_id_to_dts_path(id);
+      let source_path = dts_to_source(dts_path);
+      self.dts_map.get(&source_path).map(|entry| entry.clone())
+    });
 
     if let Some(module) = dts_module {
       // Generate .d.ts using Oxc isolated declarations
