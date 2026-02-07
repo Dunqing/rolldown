@@ -465,11 +465,8 @@ fn write_fake_var(
   // Escape the source for embedding as a JS string literal
   let escaped_source = escape_js_string(original_source);
 
-  writeln!(
-    output,
-    "var {name} = [{id}, () => {deps_str}, [\"{name}\"], \"{escaped_source}\"];",
-  )
-  .ok();
+  writeln!(output, "var {name} = [{id}, () => {deps_str}, [\"{name}\"], \"{escaped_source}\"];",)
+    .ok();
 }
 
 /// Escape a string for use as a JavaScript string literal.

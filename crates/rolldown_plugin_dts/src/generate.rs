@@ -150,10 +150,8 @@ impl Plugin for DtsPlugin {
       );
 
       // Extract base name from the source file (e.g., "main" from "main.ts")
-      let entry_name = std::path::Path::new(id)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .map(ArcStr::from);
+      let entry_name =
+        std::path::Path::new(id).file_stem().and_then(|s| s.to_str()).map(ArcStr::from);
 
       // Emit a virtual chunk for the .d.ts module
       ctx
@@ -306,8 +304,8 @@ impl Plugin for DtsPlugin {
       if let Output::Chunk(chunk_arc) = output {
         // Check if this chunk contains DTS content (fake JS from our transform)
         // Detection: look for passthrough markers or our fake var format
-        let is_dts_chunk = chunk_arc.code.contains("__DTS_PASSTHROUGH__:")
-          || is_fake_dts_var(&chunk_arc.code);
+        let is_dts_chunk =
+          chunk_arc.code.contains("__DTS_PASSTHROUGH__:") || is_fake_dts_var(&chunk_arc.code);
 
         if is_dts_chunk {
           // Clone the chunk's data, modify it, and replace the Arc
