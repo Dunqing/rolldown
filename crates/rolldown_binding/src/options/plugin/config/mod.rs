@@ -1,3 +1,4 @@
+mod binding_dts_plugin_config;
 mod binding_esm_external_require_plugin_config;
 mod binding_isolated_declaration_plugin_config;
 mod binding_replace_plugin_config;
@@ -14,6 +15,7 @@ mod binding_vite_resolve_plugin_config;
 mod binding_vite_transform_plugin_config;
 mod binding_vite_wasm_helper_plugin_config;
 
+pub use binding_dts_plugin_config::BindingDtsPluginConfig;
 pub use binding_esm_external_require_plugin_config::BindingEsmExternalRequirePluginConfig;
 pub use binding_isolated_declaration_plugin_config::BindingIsolatedDeclarationPluginConfig;
 pub use binding_replace_plugin_config::BindingReplacePluginConfig;

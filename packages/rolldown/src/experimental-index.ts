@@ -30,6 +30,8 @@ export { defineParallelPlugin } from './plugin/parallel-plugin';
 export { parse, parseSync } from './utils/parse';
 // Builtin plugin factory
 export {
+  dtsPlugin,
+  type DtsPluginConfig,
   isolatedDeclarationPlugin,
   viteBuildImportAnalysisPlugin,
   viteDynamicImportVarsPlugin,

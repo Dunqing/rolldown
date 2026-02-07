@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use napi::{Unknown, bindgen_prelude::FromNapiValue};
 use rolldown_plugin::__inner::Pluginable;
+use rolldown_plugin_dts::DtsPlugin;
 use rolldown_plugin_esm_external_require::EsmExternalRequirePlugin;
 use rolldown_plugin_isolated_declaration::IsolatedDeclarationPlugin;
 use rolldown_plugin_replace::ReplacePlugin;
@@ -22,8 +23,9 @@ use rolldown_plugin_vite_wasm_helper::ViteWasmHelperPlugin;
 use rolldown_plugin_vite_web_worker_post::ViteWebWorkerPostPlugin;
 
 use crate::options::plugin::config::{
-  BindingEsmExternalRequirePluginConfig, BindingViteModulePreloadPolyfillPluginConfig,
-  BindingViteReactRefreshWrapperPluginConfig, BindingViteWasmHelperPluginConfig,
+  BindingDtsPluginConfig, BindingEsmExternalRequirePluginConfig,
+  BindingViteModulePreloadPolyfillPluginConfig, BindingViteReactRefreshWrapperPluginConfig,
+  BindingViteWasmHelperPluginConfig,
 };
 
 use super::{
@@ -59,6 +61,14 @@ impl TryFrom<BindingBuiltinPlugin<'_>> for Arc<dyn Pluginable> {
 
   fn try_from(plugin: BindingBuiltinPlugin) -> Result<Self, Self::Error> {
     Ok(match plugin.__name {
+      BindingBuiltinPluginName::Dts => {
+        let options = if let Some(options) = plugin.options {
+          BindingDtsPluginConfig::from_unknown(options)?.into()
+        } else {
+          rolldown_plugin_dts::DtsPluginOptions::default()
+        };
+        Arc::new(DtsPlugin::new(options))
+      }
       BindingBuiltinPluginName::EsmExternalRequire => {
         let plugin = if let Some(options) = plugin.options {
           BindingEsmExternalRequirePluginConfig::from_unknown(options)?.into()

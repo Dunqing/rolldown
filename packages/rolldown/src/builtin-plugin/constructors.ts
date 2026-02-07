@@ -86,6 +86,19 @@ export function isolatedDeclarationPlugin(
   return new BuiltinPlugin('builtin:isolated-declaration', config);
 }
 
+export interface DtsPluginConfig {
+  /** Whether to strip `@internal` annotated declarations. */
+  stripInternal?: boolean;
+  /** Whether to emit only `.d.ts` files (remove JS chunks from output). */
+  emitDtsOnly?: boolean;
+  /** Whether to generate source maps for declaration files. */
+  sourcemap?: boolean;
+}
+
+export function dtsPlugin(config?: DtsPluginConfig): BuiltinPlugin {
+  return new BuiltinPlugin('builtin:dts', config);
+}
+
 export function viteWebWorkerPostPlugin(): BuiltinPlugin {
   return new BuiltinPlugin('builtin:vite-web-worker-post');
 }
