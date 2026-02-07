@@ -50,11 +50,7 @@ pub struct DtsPlugin {
 
 impl DtsPlugin {
   pub fn new(options: DtsPluginOptions) -> Self {
-    Self {
-      options,
-      dts_map: DashMap::new(),
-      declaration_id_counter: AtomicU32::new(0),
-    }
+    Self { options, dts_map: DashMap::new(), declaration_id_counter: AtomicU32::new(0) }
   }
 
   /// Generate `.d.ts` code from TypeScript source using Oxc isolated declarations.
@@ -124,14 +120,15 @@ impl Plugin for DtsPlugin {
       );
 
       // Emit a virtual chunk for the .d.ts module
-      ctx.emit_chunk(EmittedChunk {
-        id: virtual_id,
-        name: None,
-        file_name: None,
-        importer: Some(id.to_string()),
-        preserve_entry_signatures: None,
-      })
-      .await?;
+      ctx
+        .emit_chunk(EmittedChunk {
+          id: virtual_id,
+          name: None,
+          file_name: None,
+          importer: Some(id.to_string()),
+          preserve_entry_signatures: None,
+        })
+        .await?;
 
       // Don't modify the original source
       return Ok(None);
@@ -160,7 +157,7 @@ impl Plugin for DtsPlugin {
   /// Resolve virtual DTS module IDs.
   async fn resolve_id(
     &self,
-    _ctx: &rolldown_plugin::PluginContext,
+    ctx: &rolldown_plugin::PluginContext,
     args: &rolldown_plugin::HookResolveIdArgs<'_>,
   ) -> rolldown_plugin::HookResolveIdReturn {
     let specifier = args.specifier;
@@ -174,24 +171,54 @@ impl Plugin for DtsPlugin {
       }));
     }
 
-    // When importing from within a .d.ts context, resolve .ts imports to their .d.ts counterparts
+    // When importing from within a .d.ts context, resolve imports appropriately
     if let Some(importer) = args.importer {
-      if (is_dts(importer) || is_dts_virtual_id(importer)) && is_ts_source(specifier) {
-        let dts_specifier = source_to_dts(specifier);
-        let virtual_id = make_dts_virtual_id(specifier);
-        if self.dts_map.contains_key(&virtual_id) {
+      let in_dts_context = is_dts(importer) || is_dts_virtual_id(importer);
+
+      if in_dts_context {
+        // If specifier is a .ts file, resolve to its .d.ts counterpart
+        if is_ts_source(specifier) {
+          let virtual_id = make_dts_virtual_id(specifier);
+          if self.dts_map.contains_key(&virtual_id) {
+            return Ok(Some(rolldown_plugin::HookResolveIdOutput {
+              id: ArcStr::from(virtual_id),
+              side_effects: Some(HookSideEffects::False),
+              ..Default::default()
+            }));
+          }
+          // Try resolving as .d.ts
+          let dts_specifier = source_to_dts(specifier);
           return Ok(Some(rolldown_plugin::HookResolveIdOutput {
-            id: ArcStr::from(virtual_id),
+            id: ArcStr::from(dts_specifier),
             side_effects: Some(HookSideEffects::False),
             ..Default::default()
           }));
         }
-        // Try resolving as .d.ts
-        return Ok(Some(rolldown_plugin::HookResolveIdOutput {
-          id: ArcStr::from(dts_specifier),
-          side_effects: Some(HookSideEffects::False),
-          ..Default::default()
-        }));
+
+        // For relative imports without extensions, try to resolve as .d.ts
+        // Check if the specifier has no file extension (last path segment has no dot)
+        let is_extensionless =
+          specifier.starts_with('.') && !specifier.rsplit('/').next().unwrap_or("").contains('.');
+        if is_extensionless {
+          // First, try the normal resolver
+          if let Ok(Ok(resolved)) = ctx.resolve(specifier, Some(importer), None).await {
+            return Ok(Some(rolldown_plugin::HookResolveIdOutput {
+              id: resolved.id.into_inner(),
+              side_effects: Some(HookSideEffects::False),
+              ..Default::default()
+            }));
+          }
+
+          // If normal resolution fails, compute absolute path with .d.ts extension
+          let importer_dir =
+            std::path::Path::new(importer).parent().unwrap_or(std::path::Path::new("."));
+          let dts_path = importer_dir.join(format!("{}.d.ts", &specifier[2..])); // strip "./"
+          return Ok(Some(rolldown_plugin::HookResolveIdOutput {
+            id: ArcStr::from(dts_path.to_string_lossy().to_string()),
+            side_effects: Some(HookSideEffects::False),
+            ..Default::default()
+          }));
+        }
       }
     }
 
@@ -247,10 +274,7 @@ impl Plugin for DtsPlugin {
 
     let reconstructed = fake_js::fake_js_to_dts(&args.code, filename);
 
-    Ok(Some(HookRenderChunkOutput {
-      code: reconstructed,
-      map: None,
-    }))
+    Ok(Some(HookRenderChunkOutput { code: reconstructed, map: None }))
   }
 
   /// If `emit_dts_only` is set, remove non-.d.ts chunks from output.

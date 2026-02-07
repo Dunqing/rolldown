@@ -29,9 +29,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use anyhow::Result;
 use oxc::allocator::Allocator;
 use oxc::ast::ast::{
-  BindingPattern, Declaration, ImportDeclarationSpecifier,
-  ImportOrExportKind, Statement, TSModuleDeclarationName, TSTypeName, TSTypeQueryExprName,
-  TSTypeReference, TSTypeQuery,
+  BindingPattern, Declaration, ImportDeclarationSpecifier, ImportOrExportKind, Statement,
+  TSModuleDeclarationName, TSTypeName, TSTypeQuery, TSTypeQueryExprName, TSTypeReference,
 };
 use oxc::ast_visit::{Visit, walk};
 use oxc::parser::Parser;
@@ -41,6 +40,24 @@ use crate::resolver;
 
 /// Marker used to store the original declaration source in a trailing comment.
 const DTS_DECL_MARKER: &str = "__DTS_DECL__:";
+
+/// Marker for reference directives that must be preserved at the top of the output.
+const DTS_REFERENCE_MARKER: &str = "__DTS_REFERENCE__:";
+
+/// Extract `/// <reference ... />` directives from the beginning of a `.d.ts` file.
+fn extract_reference_directives(code: &str) -> Vec<&str> {
+  let mut directives = Vec::new();
+  for line in code.lines() {
+    let trimmed = line.trim();
+    if trimmed.starts_with("/// <reference") && trimmed.ends_with("/>") {
+      directives.push(trimmed);
+    } else if !trimmed.is_empty() && !trimmed.starts_with("//") {
+      // Stop when we hit non-comment, non-empty content
+      break;
+    }
+  }
+  directives
+}
 
 /// Convert a `.d.ts` file to fake JavaScript that preserves dependency information.
 ///
@@ -60,6 +77,11 @@ pub fn dts_to_fake_js(dts_code: &str, filename: &str, id_counter: &AtomicU32) ->
   let mut output = String::new();
   let mut exports: Vec<ExportInfo> = Vec::new();
   let mut default_export: Option<String> = None;
+
+  // Emit reference directives at the beginning
+  for directive in extract_reference_directives(dts_code) {
+    writeln!(output, "/* {DTS_REFERENCE_MARKER}{} */", escape_comment(directive)).ok();
+  }
 
   for stmt in &program.body {
     let stmt_start = stmt.span().start as usize;
@@ -309,11 +331,7 @@ fn handle_exported_declaration(
       };
       let id = id_counter.fetch_add(1, Ordering::Relaxed);
       write_fake_var(output, &name, id, &deps, original_source);
-      exports.push(ExportInfo {
-        local_name: name.clone(),
-        exported_name: name,
-        is_type: false,
-      });
+      exports.push(ExportInfo { local_name: name.clone(), exported_name: name, is_type: false });
     }
     _ => {
       writeln!(output, "/* __DTS_PASSTHROUGH__:{} */", escape_comment(original_source)).ok();
@@ -370,12 +388,32 @@ fn write_import_specifiers(
 
 /// Convert bundled fake JS back to valid `.d.ts` declarations.
 ///
-/// This reads the `__DTS_DECL__` and `__DTS_PASSTHROUGH__` comments to reconstruct
-/// the original declarations, then fixes import/export extensions.
+/// This reads the `__DTS_DECL__`, `__DTS_PASSTHROUGH__`, and `__DTS_REFERENCE__` comments
+/// to reconstruct the original declarations, then fixes import/export extensions.
 pub fn fake_js_to_dts(fake_js_code: &str, _filename: &str) -> String {
   let mut output = String::new();
+  let mut reference_directives: Vec<String> = Vec::new();
   let mut seen_declarations: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
 
+  // First pass: collect reference directives
+  for line in fake_js_code.lines() {
+    let trimmed = line.trim();
+    if let Some(ref_marker) = trimmed.find(DTS_REFERENCE_MARKER) {
+      let content = &trimmed[ref_marker + DTS_REFERENCE_MARKER.len()..];
+      let content = content.strip_suffix("*/").unwrap_or(content).trim();
+      let unescaped = unescape_comment(content);
+      if !reference_directives.contains(&unescaped) {
+        reference_directives.push(unescaped);
+      }
+    }
+  }
+
+  // Emit reference directives at the top
+  for directive in &reference_directives {
+    writeln!(output, "{directive}").ok();
+  }
+
+  // Second pass: extract declarations
   for line in fake_js_code.lines() {
     let trimmed = line.trim();
 
@@ -412,11 +450,7 @@ struct ExportInfo {
 
 impl ExportInfo {
   fn named(name: &str, is_type: bool) -> Self {
-    Self {
-      local_name: name.to_string(),
-      exported_name: name.to_string(),
-      is_type,
-    }
+    Self { local_name: name.to_string(), exported_name: name.to_string(), is_type }
   }
 }
 
@@ -428,11 +462,8 @@ fn write_fake_var(
   deps: &[String],
   original_source: &str,
 ) {
-  let deps_str = if deps.is_empty() {
-    String::from("[]")
-  } else {
-    format!("[{}]", deps.join(", "))
-  };
+  let deps_str =
+    if deps.is_empty() { String::from("[]") } else { format!("[{}]", deps.join(", ")) };
 
   writeln!(
     output,
@@ -594,5 +625,53 @@ mod tests {
     assert!(is_builtin_type("Array"));
     assert!(is_builtin_type("Promise"));
     assert!(!is_builtin_type("MyCustomType"));
+  }
+
+  #[test]
+  fn test_reference_directives() {
+    let dts = r#"/// <reference types="node" />
+/// <reference path="./global.d.ts" />
+
+export interface Foo {
+  x: number;
+}
+"#;
+    let counter = AtomicU32::new(0);
+    let fake_js = dts_to_fake_js(dts, "test.d.ts", &counter).unwrap();
+
+    // Reference directives should be preserved
+    assert!(fake_js.contains(DTS_REFERENCE_MARKER));
+    assert!(fake_js.contains("reference types=\"node\""));
+    assert!(fake_js.contains("reference path=\"./global.d.ts\""));
+
+    // Roundtrip should preserve reference directives at the top
+    let reconstructed = fake_js_to_dts(&fake_js, "test.d.ts");
+    assert!(reconstructed.contains("/// <reference types=\"node\""));
+    assert!(reconstructed.contains("/// <reference path=\"./global.d.ts\""));
+  }
+
+  #[test]
+  fn test_declare_global() {
+    let dts = "declare global {
+  interface Window {
+    myProperty: string;
+  }
+}
+
+export interface Foo {
+  x: number;
+}
+";
+    let counter = AtomicU32::new(0);
+    let fake_js = dts_to_fake_js(dts, "test.d.ts", &counter).unwrap();
+
+    // declare global should be preserved
+    assert!(fake_js.contains("declare global"));
+
+    // Roundtrip should preserve declare global
+    let reconstructed = fake_js_to_dts(&fake_js, "test.d.ts");
+    assert!(reconstructed.contains("declare global"));
+    assert!(reconstructed.contains("interface Window"));
+    assert!(reconstructed.contains("myProperty: string"));
   }
 }

@@ -28,11 +28,7 @@ pub fn source_to_dts(id: &str) -> String {
   let path = Path::new(id);
   let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
   let parent = path.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-  if parent.is_empty() {
-    format!("{stem}.d.ts")
-  } else {
-    format!("{parent}/{stem}.d.ts")
-  }
+  if parent.is_empty() { format!("{stem}.d.ts") } else { format!("{parent}/{stem}.d.ts") }
 }
 
 /// Convert a `.d.ts` path back to a virtual module ID prefix.
@@ -46,30 +42,28 @@ pub fn is_dts_virtual_id(id: &str) -> bool {
   id.starts_with("\0dts:")
 }
 
-/// Extract the real `.d.ts` path from a virtual DTS module ID.
-#[expect(dead_code)]
-pub fn virtual_id_to_dts_path(id: &str) -> &str {
-  id.strip_prefix("\0dts:").unwrap_or(id)
-}
-
-/// Convert a `.d.ts` import path to its `.js` counterpart for output.
-/// e.g., `./foo.d.ts` -> `./foo.js`
-#[expect(dead_code)]
-pub fn dts_to_js_extension(id: &str) -> String {
-  if let Some(stripped) = id.strip_suffix(".d.ts") {
-    format!("{stripped}.js")
-  } else if let Some(stripped) = id.strip_suffix(".d.mts") {
-    format!("{stripped}.mjs")
-  } else if let Some(stripped) = id.strip_suffix(".d.cts") {
-    format!("{stripped}.cjs")
-  } else {
-    id.to_string()
-  }
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  /// Extract the real `.d.ts` path from a virtual DTS module ID.
+  fn virtual_id_to_dts_path(id: &str) -> &str {
+    id.strip_prefix("\0dts:").unwrap_or(id)
+  }
+
+  /// Convert a `.d.ts` import path to its `.js` counterpart for output.
+  /// e.g., `./foo.d.ts` -> `./foo.js`
+  fn dts_to_js_extension(id: &str) -> String {
+    if let Some(stripped) = id.strip_suffix(".d.ts") {
+      format!("{stripped}.js")
+    } else if let Some(stripped) = id.strip_suffix(".d.mts") {
+      format!("{stripped}.mjs")
+    } else if let Some(stripped) = id.strip_suffix(".d.cts") {
+      format!("{stripped}.cjs")
+    } else {
+      id.to_string()
+    }
+  }
 
   #[test]
   fn test_is_ts_source() {

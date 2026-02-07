@@ -6,7 +6,7 @@ use crate::utils::{is_dts, source_to_dts};
 /// - Source file imports (`.ts`) are redirected to their `.d.ts` counterparts
 /// - Package imports are resolved to their type definitions
 /// - Relative `.d.ts` imports are passed through
-#[expect(dead_code)]
+#[expect(dead_code, reason = "will be used when resolver is fully integrated")]
 pub fn resolve_dts_import(specifier: &str, _importer: &str) -> Option<String> {
   // If already a .d.ts import, pass through
   if is_dts(specifier) {
@@ -31,14 +31,32 @@ pub fn resolve_dts_import(specifier: &str, _importer: &str) -> Option<String> {
 
 /// Convert declaration import paths in output to use `.js` extensions.
 /// e.g., `import { Foo } from './bar.d.ts'` -> `import { Foo } from './bar.js'`
+///
+/// Note: This does NOT modify reference directives (`/// <reference ...>`)
+/// since those should continue to reference `.d.ts` files.
 pub fn fix_output_extensions(code: &str) -> String {
-  // This is a simplified version. The full implementation would
-  // use AST-based import rewriting.
-  code
-    .replace(".d.ts'", ".js'")
-    .replace(".d.ts\"", ".js\"")
-    .replace(".d.mts'", ".mjs'")
-    .replace(".d.mts\"", ".mjs\"")
-    .replace(".d.cts'", ".cjs'")
-    .replace(".d.cts\"", ".cjs\"")
+  let mut result = String::new();
+  for line in code.lines() {
+    let trimmed = line.trim();
+    // Don't modify reference directives - they should keep .d.ts extensions
+    if trimmed.starts_with("/// <reference") {
+      result.push_str(line);
+    } else {
+      // Fix import/export extensions
+      let fixed = line
+        .replace(".d.ts'", ".js'")
+        .replace(".d.ts\"", ".js\"")
+        .replace(".d.mts'", ".mjs'")
+        .replace(".d.mts\"", ".mjs\"")
+        .replace(".d.cts'", ".cjs'")
+        .replace(".d.cts\"", ".cjs\"");
+      result.push_str(&fixed);
+    }
+    result.push('\n');
+  }
+  // Remove trailing newline if original didn't have one
+  if !code.ends_with('\n') && result.ends_with('\n') {
+    result.pop();
+  }
+  result
 }
