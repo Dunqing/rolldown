@@ -312,19 +312,27 @@ impl Plugin for DtsPlugin {
       return Ok(None);
     }
 
-    // Look up the captured source module
-    // Try virtual ID first, then try converting to source path
-    let dts_module = self.dts_map.get(id).map(|entry| entry.clone()).or_else(|| {
-      // Convert virtual ID to source path and try again
-      let dts_path = virtual_id_to_dts_path(id);
-      let source_path = dts_to_source(dts_path);
-      self.dts_map.get(&source_path).map(|entry| entry.clone())
-    });
+    // Convert virtual ID to source path
+    let dts_path = virtual_id_to_dts_path(id);
+    let source_path = dts_to_source(dts_path);
 
-    if let Some(module) = dts_module {
-      // Generate .d.ts using Oxc isolated declarations
+    // Try to find captured source in dts_map first
+    if let Some(module) =
+      self.dts_map.get(id).or_else(|| self.dts_map.get(&source_path)).map(|entry| entry.clone())
+    {
       let dts_code = self.generate_dts(&module.source_id, &module.code)?;
+      return Ok(Some(HookLoadOutput {
+        code: ArcStr::from(dts_code),
+        module_type: Some(ModuleType::Custom("dts".to_string())),
+        side_effects: Some(HookSideEffects::False),
+        ..Default::default()
+      }));
+    }
 
+    // If not in dts_map, try reading the source file from disk
+    // This handles the case where dependencies haven't been transformed yet
+    if let Ok(code) = std::fs::read_to_string(&source_path) {
+      let dts_code = self.generate_dts(&source_path, &code)?;
       return Ok(Some(HookLoadOutput {
         code: ArcStr::from(dts_code),
         module_type: Some(ModuleType::Custom("dts".to_string())),
