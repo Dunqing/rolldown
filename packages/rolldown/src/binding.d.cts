@@ -1713,7 +1713,8 @@ export interface BindingBuiltinPlugin {
   options?: unknown
 }
 
-export type BindingBuiltinPluginName =  'builtin:esm-external-require'|
+export type BindingBuiltinPluginName =  'builtin:dts'|
+'builtin:esm-external-require'|
 'builtin:isolated-declaration'|
 'builtin:replace'|
 'builtin:vite-alias'|
@@ -1804,6 +1805,15 @@ export interface BindingDevWatchOptions {
   debounceDuration?: number
   compareContentsForPolling?: boolean
   debounceTickRate?: number
+}
+
+export interface BindingDtsPluginConfig {
+  /** Whether to strip `@internal` annotated declarations. */
+  stripInternal?: boolean
+  /** Whether to emit only `.d.ts` files (remove JS chunks from output). */
+  emitDtsOnly?: boolean
+  /** Whether to generate source maps for declaration files. */
+  sourcemap?: boolean
 }
 
 export interface BindingEmittedAsset {

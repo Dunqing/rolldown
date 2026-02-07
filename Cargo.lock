@@ -3096,12 +3096,7 @@ dependencies = [
  "rolldown_common",
  "rolldown_error",
  "rolldown_plugin",
- "rolldown_sourcemap",
- "rolldown_testing",
  "rustc-hash",
- "string_wizard",
- "sugar_path",
- "testing_macros",
 ]
 
 [[package]]

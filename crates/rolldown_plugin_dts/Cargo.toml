@@ -22,11 +22,6 @@ oxc = { workspace = true }
 rolldown_common = { workspace = true }
 rolldown_error = { workspace = true }
 rolldown_plugin = { workspace = true }
-rolldown_sourcemap = { workspace = true }
 rustc-hash = { workspace = true }
-sugar_path = { workspace = true }
-string_wizard = { workspace = true }
 
 [dev-dependencies]
-rolldown_testing = { path = '../rolldown_testing' }
-testing_macros = { workspace = true }
