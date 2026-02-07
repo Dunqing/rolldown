@@ -10,13 +10,43 @@ use oxc::{
 use rolldown_common::{EmittedChunk, ModuleType, Output, side_effects::HookSideEffects};
 use rolldown_error::{BatchedBuildDiagnostic, BuildDiagnostic, EventKind, Severity};
 use rolldown_plugin::{
-  HookLoadOutput, HookRenderChunkOutput, HookTransformOutput, HookUsage, Plugin, PluginHookMeta,
-  PluginOrder,
+  HookLoadOutput, HookTransformOutput, HookUsage, Plugin, PluginHookMeta, PluginOrder,
 };
 
 use crate::fake_js;
 use crate::options::DtsPluginOptions;
 use crate::utils::{is_dts, is_dts_virtual_id, is_ts_source, make_dts_virtual_id, source_to_dts};
+
+/// Check if the code contains fake DTS variable declarations.
+/// Looks for patterns indicating our fake JS format, which may be reformatted across lines.
+fn is_fake_dts_var(code: &str) -> bool {
+  // Check for the array pattern with embedded source string
+  // Rolldown may reformat this across lines, so we check the whole code
+  // Look for: ["name"],\n\t"source" patterns (the last two elements of our array)
+  code.contains("\"],\n\t\"") || code.contains("\"],\n  \"") || code.contains("\"], \"")
+}
+
+/// Convert a JS filename to its DTS equivalent.
+/// e.g., "main.js" -> "main.d.ts", "main.d.js" -> "main.d.ts"
+fn convert_js_to_dts_filename(filename: &str) -> String {
+  // Check for .d.js/.d.mjs/.d.cjs first (more specific patterns)
+  if let Some(stem) = filename.strip_suffix(".d.js") {
+    format!("{stem}.d.ts")
+  } else if let Some(stem) = filename.strip_suffix(".d.mjs") {
+    format!("{stem}.d.mts")
+  } else if let Some(stem) = filename.strip_suffix(".d.cjs") {
+    format!("{stem}.d.cts")
+  } else if let Some(stem) = filename.strip_suffix(".js") {
+    format!("{stem}.d.ts")
+  } else if let Some(stem) = filename.strip_suffix(".mjs") {
+    format!("{stem}.d.mts")
+  } else if let Some(stem) = filename.strip_suffix(".cjs") {
+    format!("{stem}.d.cts")
+  } else {
+    // Fallback: just add .d.ts
+    format!("{filename}.d.ts")
+  }
+}
 
 /// A captured TypeScript module that will produce a `.d.ts` declaration.
 #[derive(Debug, Clone)]
@@ -259,30 +289,39 @@ impl Plugin for DtsPlugin {
     Ok(None)
   }
 
-  /// Convert bundled fake JS back to .d.ts declarations.
-  async fn render_chunk(
-    &self,
-    _ctx: &rolldown_plugin::PluginContext,
-    args: &rolldown_plugin::HookRenderChunkArgs<'_>,
-  ) -> rolldown_plugin::HookRenderChunkReturn {
-    let filename = &args.chunk.filename;
-
-    // Only process .d.ts output chunks
-    if !is_dts(filename) {
-      return Ok(None);
-    }
-
-    let reconstructed = fake_js::fake_js_to_dts(&args.code, filename);
-
-    Ok(Some(HookRenderChunkOutput { code: reconstructed, map: None }))
-  }
-
-  /// If `emit_dts_only` is set, remove non-.d.ts chunks from output.
+  /// Convert bundled fake JS back to .d.ts declarations and rename output files.
   async fn generate_bundle(
     &self,
     _ctx: &rolldown_plugin::PluginContext,
     args: &mut rolldown_plugin::HookGenerateBundleArgs<'_>,
   ) -> rolldown_plugin::HookNoopReturn {
+    // Process each chunk to convert fake JS to DTS and rename files
+    for output in args.bundle.iter_mut() {
+      if let Output::Chunk(chunk_arc) = output {
+        // Check if this chunk contains DTS content (fake JS from our transform)
+        // Detection: look for passthrough markers or our fake var format
+        let is_dts_chunk = chunk_arc.code.contains("__DTS_PASSTHROUGH__:")
+          || is_fake_dts_var(&chunk_arc.code);
+
+        if is_dts_chunk {
+          // Clone the chunk's data, modify it, and replace the Arc
+          let chunk_ref: &rolldown_common::OutputChunk = chunk_arc;
+          let mut chunk = chunk_ref.clone();
+
+          // Convert fake JS back to DTS
+          chunk.code = fake_js::fake_js_to_dts(&chunk.code, &chunk.filename);
+
+          // Rename the file to .d.ts extension
+          let new_filename = convert_js_to_dts_filename(&chunk.filename);
+          chunk.filename = ArcStr::from(new_filename);
+
+          // Replace the Arc with the modified chunk
+          *output = Output::Chunk(std::sync::Arc::new(chunk));
+        }
+      }
+    }
+
+    // If emit_dts_only is set, remove non-.d.ts chunks from output
     if self.options.emit_dts_only {
       args.bundle.retain(|output| match output {
         Output::Chunk(chunk) => is_dts(&chunk.filename),
@@ -293,10 +332,6 @@ impl Plugin for DtsPlugin {
   }
 
   fn register_hook_usage(&self) -> HookUsage {
-    HookUsage::Transform
-      | HookUsage::ResolveId
-      | HookUsage::Load
-      | HookUsage::RenderChunk
-      | HookUsage::GenerateBundle
+    HookUsage::Transform | HookUsage::ResolveId | HookUsage::Load | HookUsage::GenerateBundle
   }
 }

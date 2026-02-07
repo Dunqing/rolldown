@@ -4,10 +4,6 @@ import { dtsPlugin } from 'rolldown/experimental';
 import { expect } from 'vitest';
 
 export default defineTest({
-  // TODO: Reference directive handling works in fake_js (unit tested),
-  // but integration needs output filename to be .d.ts for render_chunk to trigger.
-  // Skip for now until we add proper entryFileNames handling for .d.ts input.
-  skip: true,
   sequential: true,
   config: {
     input: 'main.d.ts',

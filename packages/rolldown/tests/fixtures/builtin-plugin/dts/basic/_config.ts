@@ -10,18 +10,23 @@ export default defineTest({
     plugins: [dtsPlugin()],
   },
   async afterTest(output) {
-    // Check that output contains the bundled file
-    // Note: The plugin transforms .d.ts to fake JS for bundling
-    expect(getOutputFileNames(output)).toMatchInlineSnapshot(`
+    // Check that output contains the bundled declaration file
+    const fileNames = getOutputFileNames(output);
+    console.log('Output file names:', fileNames);
+
+    const chunks = getOutputChunk(output);
+    console.log('Chunk code:', JSON.stringify(chunks[0].code));
+
+    expect(fileNames).toMatchInlineSnapshot(`
       [
-        "main.d.js",
+        "main.d.ts",
       ]
     `);
 
-    // The output should contain the bundled types
-    const chunk = getOutputChunk(output);
-    expect(chunk[0].code).toContain('User');
-    expect(chunk[0].code).toContain('UserId');
-    expect(chunk[0].code).toContain('App');
+    // The output should contain the bundled types (reconstructed from fake JS)
+    const chunk = chunks[0];
+    expect(chunk.code).toContain('User');
+    expect(chunk.code).toContain('UserId');
+    expect(chunk.code).toContain('App');
   },
 });

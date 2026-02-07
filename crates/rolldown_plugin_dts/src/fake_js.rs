@@ -38,12 +38,6 @@ use oxc::span::{GetSpan, SourceType};
 
 use crate::resolver;
 
-/// Marker used to store the original declaration source in a trailing comment.
-const DTS_DECL_MARKER: &str = "__DTS_DECL__:";
-
-/// Marker for reference directives that must be preserved at the top of the output.
-const DTS_REFERENCE_MARKER: &str = "__DTS_REFERENCE__:";
-
 /// Extract `/// <reference ... />` directives from the beginning of a `.d.ts` file.
 fn extract_reference_directives(code: &str) -> Vec<&str> {
   let mut directives = Vec::new();
@@ -78,9 +72,14 @@ pub fn dts_to_fake_js(dts_code: &str, filename: &str, id_counter: &AtomicU32) ->
   let mut exports: Vec<ExportInfo> = Vec::new();
   let mut default_export: Option<String> = None;
 
-  // Emit reference directives at the beginning
-  for directive in extract_reference_directives(dts_code) {
-    writeln!(output, "/* {DTS_REFERENCE_MARKER}{} */", escape_comment(directive)).ok();
+  // Emit reference directives as exported fake variables (must be exported to avoid tree-shaking)
+  for (i, directive) in extract_reference_directives(dts_code).into_iter().enumerate() {
+    writeln!(
+      output,
+      "export var __dts_ref_{i}__ = [\"__DTS_REF__\", \"{}\"];",
+      escape_js_string(directive)
+    )
+    .ok();
   }
 
   for stmt in &program.body {
@@ -395,16 +394,11 @@ pub fn fake_js_to_dts(fake_js_code: &str, _filename: &str) -> String {
   let mut reference_directives: Vec<String> = Vec::new();
   let mut seen_declarations: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
 
-  // First pass: collect reference directives
-  for line in fake_js_code.lines() {
-    let trimmed = line.trim();
-    if let Some(ref_marker) = trimmed.find(DTS_REFERENCE_MARKER) {
-      let content = &trimmed[ref_marker + DTS_REFERENCE_MARKER.len()..];
-      let content = content.strip_suffix("*/").unwrap_or(content).trim();
-      let unescaped = unescape_comment(content);
-      if !reference_directives.contains(&unescaped) {
-        reference_directives.push(unescaped);
-      }
+  // First pass: collect reference directives from fake variables
+  // Format: var __dts_ref__ = ["__DTS_REF__", "/// <reference...>"];
+  for directive in extract_reference_directives_from_fake_js(fake_js_code) {
+    if !reference_directives.contains(&directive) {
+      reference_directives.push(directive);
     }
   }
 
@@ -413,26 +407,27 @@ pub fn fake_js_to_dts(fake_js_code: &str, _filename: &str) -> String {
     writeln!(output, "{directive}").ok();
   }
 
-  // Second pass: extract declarations
+  // Second pass: extract passthrough comments (line by line)
   for line in fake_js_code.lines() {
     let trimmed = line.trim();
-
-    if let Some(decl_start) = trimmed.find(DTS_DECL_MARKER) {
-      // Extract declaration from __DTS_DECL__ comment
-      let decl_content = &trimmed[decl_start + DTS_DECL_MARKER.len()..];
-      let decl = decl_content.strip_suffix("*/").unwrap_or(decl_content).trim();
-      let unescaped = unescape_comment(decl);
-      if seen_declarations.insert(unescaped.clone()) {
-        writeln!(output, "{unescaped}").ok();
-      }
-    } else if let Some(pt_marker) = trimmed.find("__DTS_PASSTHROUGH__:") {
-      // Extract passthrough content
+    if let Some(pt_marker) = trimmed.find("__DTS_PASSTHROUGH__:") {
       let content = &trimmed[pt_marker + "__DTS_PASSTHROUGH__:".len()..];
       let content = content.strip_suffix("*/").unwrap_or(content).trim();
       let unescaped = unescape_comment(content);
       writeln!(output, "{unescaped}").ok();
     }
-    // Skip: fake JS vars, empty lines, comments, bundler artifacts, JS re-exports
+  }
+
+  // Third pass: extract declaration sources from fake JS arrays
+  // These may be formatted across multiple lines by Rolldown
+  for source in extract_all_decl_sources(fake_js_code) {
+    // Skip reference directives (already handled above)
+    if source.starts_with("/// <reference") {
+      continue;
+    }
+    if seen_declarations.insert(source.clone()) {
+      writeln!(output, "{source}").ok();
+    }
   }
 
   // Fix import/export extensions (.d.ts -> .js)
@@ -455,6 +450,8 @@ impl ExportInfo {
 }
 
 /// Write a fake JS variable declaration that encodes a TypeScript declaration.
+/// The format is: `var name = [id, () => [deps], ["name"], "escaped_original_source"];`
+/// The original source is stored as a string at index 3 to survive Rolldown's code formatting.
 fn write_fake_var(
   output: &mut String,
   name: &str,
@@ -465,12 +462,123 @@ fn write_fake_var(
   let deps_str =
     if deps.is_empty() { String::from("[]") } else { format!("[{}]", deps.join(", ")) };
 
+  // Escape the source for embedding as a JS string literal
+  let escaped_source = escape_js_string(original_source);
+
   writeln!(
     output,
-    "var {name} = [{id}, () => {deps_str}, [\"{name}\"]]; /* {DTS_DECL_MARKER}{} */",
-    escape_comment(original_source)
+    "var {name} = [{id}, () => {deps_str}, [\"{name}\"], \"{escaped_source}\"];",
   )
   .ok();
+}
+
+/// Escape a string for use as a JavaScript string literal.
+fn escape_js_string(s: &str) -> String {
+  s.replace('\\', "\\\\")
+    .replace('"', "\\\"")
+    .replace('\n', "\\n")
+    .replace('\r', "\\r")
+    .replace('\t', "\\t")
+}
+
+/// Unescape a JavaScript string literal back to the original string.
+fn unescape_js_string(s: &str) -> String {
+  let mut result = String::new();
+  let mut chars = s.chars();
+  while let Some(c) = chars.next() {
+    if c == '\\' {
+      match chars.next() {
+        Some('n') => result.push('\n'),
+        Some('r') => result.push('\r'),
+        Some('t') => result.push('\t'),
+        Some('"') => result.push('"'),
+        Some('\\') | None => result.push('\\'),
+        Some(other) => {
+          result.push('\\');
+          result.push(other);
+        }
+      }
+    } else {
+      result.push(c);
+    }
+  }
+  result
+}
+
+/// Extract reference directives from fake variables.
+/// Format: `var __dts_ref__ = ["__DTS_REF__", "/// <reference...>"];`
+fn extract_reference_directives_from_fake_js(code: &str) -> Vec<String> {
+  let mut directives = Vec::new();
+  let marker = "[\"__DTS_REF__\",";
+
+  let mut search_start = 0;
+  while let Some(pos) = code[search_start..].find(marker) {
+    let abs_pos = search_start + pos;
+    let after_marker = &code[abs_pos + marker.len()..];
+    let trimmed = after_marker.trim_start();
+
+    if let Some(quote_content) = trimmed.strip_prefix('"') {
+      if let Some(source) = extract_quoted_string(quote_content) {
+        directives.push(source);
+      }
+    }
+
+    search_start = abs_pos + marker.len();
+  }
+
+  directives
+}
+
+/// Extract all declaration sources from fake JS code.
+/// The format is: `var NAME = [id, () => deps, ["name"], "escaped_source"];`
+/// Rolldown may reformat this across multiple lines, so we search the entire code.
+fn extract_all_decl_sources(code: &str) -> Vec<String> {
+  let mut sources = Vec::new();
+
+  // Find all patterns like: ], followed by whitespace/newline, then "source"
+  // Pattern: ],\n\t"escaped_source"\n];
+  let mut search_start = 0;
+  while let Some(pos) = code[search_start..].find("],") {
+    let abs_pos = search_start + pos;
+
+    // Skip the '],' and any whitespace
+    let after_bracket = &code[abs_pos + 2..];
+    let trimmed = after_bracket.trim_start();
+
+    // Check if next non-whitespace is a quote
+    if let Some(quote_content) = trimmed.strip_prefix('"') {
+      // Find the matching quote and '];'
+      if let Some(source) = extract_quoted_string(quote_content) {
+        sources.push(source);
+      }
+    }
+
+    search_start = abs_pos + 1;
+  }
+
+  sources
+}
+
+/// Extract a quoted string, handling escape sequences.
+/// Input should start right after the opening quote.
+fn extract_quoted_string(content: &str) -> Option<String> {
+  let mut in_escape = false;
+  let mut end_pos = None;
+
+  for (i, c) in content.char_indices() {
+    if in_escape {
+      in_escape = false;
+    } else if c == '\\' {
+      in_escape = true;
+    } else if c == '"' {
+      end_pos = Some(i);
+      break;
+    }
+  }
+
+  let end = end_pos?;
+  let escaped_source = &content[..end];
+  Some(unescape_js_string(escaped_source))
 }
 
 /// Collect type dependency names referenced in a span of `.d.ts` source.
@@ -586,8 +694,10 @@ mod tests {
     let counter = AtomicU32::new(0);
     let result = dts_to_fake_js(dts, "test.d.ts", &counter).unwrap();
 
-    assert!(result.contains("var Foo = ["));
-    assert!(result.contains(DTS_DECL_MARKER));
+    // Check that fake JS variable is created
+    assert!(result.contains("var Foo = ["), "result: {result}");
+    // Check that the original source is embedded in the array (escaped)
+    assert!(result.contains("export interface Foo"), "result: {result}");
     assert!(result.contains("export {"));
   }
 
@@ -639,10 +749,11 @@ export interface Foo {
     let counter = AtomicU32::new(0);
     let fake_js = dts_to_fake_js(dts, "test.d.ts", &counter).unwrap();
 
-    // Reference directives should be preserved
-    assert!(fake_js.contains(DTS_REFERENCE_MARKER));
-    assert!(fake_js.contains("reference types=\"node\""));
-    assert!(fake_js.contains("reference path=\"./global.d.ts\""));
+    // Reference directives should be preserved as exported fake variables
+    assert!(fake_js.contains("export var __dts_ref_"));
+    assert!(fake_js.contains("__DTS_REF__"));
+    assert!(fake_js.contains("reference types=\\\"node\\\""));
+    assert!(fake_js.contains("reference path=\\\"./global.d.ts\\\""));
 
     // Roundtrip should preserve reference directives at the top
     let reconstructed = fake_js_to_dts(&fake_js, "test.d.ts");
