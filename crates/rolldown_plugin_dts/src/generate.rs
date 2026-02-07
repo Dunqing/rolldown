@@ -149,11 +149,17 @@ impl Plugin for DtsPlugin {
         },
       );
 
+      // Extract base name from the source file (e.g., "main" from "main.ts")
+      let entry_name = std::path::Path::new(id)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(ArcStr::from);
+
       // Emit a virtual chunk for the .d.ts module
       ctx
         .emit_chunk(EmittedChunk {
           id: virtual_id,
-          name: None,
+          name: entry_name,
           file_name: None,
           importer: Some(id.to_string()),
           preserve_entry_signatures: None,
