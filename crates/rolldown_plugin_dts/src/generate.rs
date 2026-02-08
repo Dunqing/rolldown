@@ -1,10 +1,11 @@
 use std::borrow::Cow;
+use std::path::PathBuf;
 use std::sync::atomic::AtomicU32;
 
 use arcstr::ArcStr;
 use dashmap::DashMap;
 use oxc::{
-  codegen::Codegen,
+  codegen::{Codegen, CodegenOptions},
   isolated_declarations::{IsolatedDeclarations, IsolatedDeclarationsOptions},
 };
 use rolldown_common::{EmittedChunk, ModuleType, Output, side_effects::HookSideEffects};
@@ -12,6 +13,7 @@ use rolldown_error::{BatchedBuildDiagnostic, BuildDiagnostic, EventKind, Severit
 use rolldown_plugin::{
   HookLoadOutput, HookTransformOutput, HookUsage, Plugin, PluginHookMeta, PluginOrder,
 };
+use rolldown_sourcemap::SourceMap;
 
 use crate::fake_js;
 use crate::options::DtsPluginOptions;
@@ -87,7 +89,12 @@ impl DtsPlugin {
   }
 
   /// Generate `.d.ts` code from TypeScript source using Oxc isolated declarations.
-  fn generate_dts(&self, source_id: &str, code: &str) -> Result<String, BatchedBuildDiagnostic> {
+  /// Returns (code, sourcemap) where sourcemap is present if `self.options.sourcemap` is true.
+  fn generate_dts(
+    &self,
+    source_id: &str,
+    code: &str,
+  ) -> Result<(String, Option<SourceMap>), BatchedBuildDiagnostic> {
     let allocator = oxc::allocator::Allocator::new();
     let source_type = oxc::span::SourceType::from_path(source_id).unwrap_or_default();
     let parser_ret = oxc::parser::Parser::new(&allocator, code, source_type).parse();
@@ -118,8 +125,18 @@ impl DtsPlugin {
       )));
     }
 
-    let codegen_ret = Codegen::new().build(&ret.program);
-    Ok(codegen_ret.code)
+    let codegen_ret = if self.options.sourcemap {
+      Codegen::new()
+        .with_options(CodegenOptions {
+          source_map_path: Some(PathBuf::from(source_id)),
+          ..CodegenOptions::default()
+        })
+        .build(&ret.program)
+    } else {
+      Codegen::new().build(&ret.program)
+    };
+
+    Ok((codegen_ret.code, codegen_ret.map))
   }
 }
 
@@ -320,24 +337,24 @@ impl Plugin for DtsPlugin {
     if let Some(module) =
       self.dts_map.get(id).or_else(|| self.dts_map.get(&source_path)).map(|entry| entry.clone())
     {
-      let dts_code = self.generate_dts(&module.source_id, &module.code)?;
+      let (dts_code, map) = self.generate_dts(&module.source_id, &module.code)?;
       return Ok(Some(HookLoadOutput {
         code: ArcStr::from(dts_code),
+        map,
         module_type: Some(ModuleType::Custom("dts".to_string())),
         side_effects: Some(HookSideEffects::False),
-        ..Default::default()
       }));
     }
 
     // If not in dts_map, try reading the source file from disk
     // This handles the case where dependencies haven't been transformed yet
     if let Ok(code) = std::fs::read_to_string(&source_path) {
-      let dts_code = self.generate_dts(&source_path, &code)?;
+      let (dts_code, map) = self.generate_dts(&source_path, &code)?;
       return Ok(Some(HookLoadOutput {
         code: ArcStr::from(dts_code),
+        map,
         module_type: Some(ModuleType::Custom("dts".to_string())),
         side_effects: Some(HookSideEffects::False),
-        ..Default::default()
       }));
     }
 
@@ -368,7 +385,12 @@ impl Plugin for DtsPlugin {
 
           // Rename the file to .d.ts extension
           let new_filename = convert_js_to_dts_filename(&chunk.filename);
-          chunk.filename = ArcStr::from(new_filename);
+          chunk.filename = ArcStr::from(new_filename.clone());
+
+          // Clear sourcemap - the fake JS map doesn't apply to DTS output
+          // TODO: Generate proper DTS sourcemap that maps back to original TS
+          chunk.map = None;
+          chunk.sourcemap_filename = None;
 
           // Replace the Arc with the modified chunk
           *output = Output::Chunk(std::sync::Arc::new(chunk));
