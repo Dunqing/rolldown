@@ -380,17 +380,22 @@ impl Plugin for DtsPlugin {
           let chunk_ref: &rolldown_common::OutputChunk = chunk_arc;
           let mut chunk = chunk_ref.clone();
 
-          // Convert fake JS back to DTS
-          chunk.code = fake_js::fake_js_to_dts(&chunk.code, &chunk.filename);
-
           // Rename the file to .d.ts extension
           let new_filename = convert_js_to_dts_filename(&chunk.filename);
+
+          // Convert fake JS back to DTS with sourcemap
+          let (dts_code, dts_map) = fake_js::fake_js_to_dts(&chunk.code, &new_filename);
+          chunk.code = dts_code;
           chunk.filename = ArcStr::from(new_filename.clone());
 
-          // Clear sourcemap - the fake JS map doesn't apply to DTS output
-          // TODO: Generate proper DTS sourcemap that maps back to original TS
-          chunk.map = None;
-          chunk.sourcemap_filename = None;
+          // Set the sourcemap if enabled
+          if self.options.sourcemap {
+            chunk.map = dts_map;
+            chunk.sourcemap_filename = Some(format!("{new_filename}.map"));
+          } else {
+            chunk.map = None;
+            chunk.sourcemap_filename = None;
+          }
 
           // Replace the Arc with the modified chunk
           *output = Output::Chunk(std::sync::Arc::new(chunk));

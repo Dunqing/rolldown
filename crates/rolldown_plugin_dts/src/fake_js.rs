@@ -10,7 +10,8 @@
 //! - A unique numeric declaration ID
 //! - A function that returns an array of referenced type dependencies
 //! - An array of child symbol names (for debugging)
-//! - The original declaration source stored in a comment
+//! - The original declaration source as a string literal
+//! - Source file path and line number for sourcemap generation
 //!
 //! This allows Rolldown to:
 //! - Track dependencies between declarations via the function references
@@ -19,7 +20,8 @@
 //!
 //! **Reverse transform** (`fake_js_to_dts`):
 //! After bundling, the fake JS is converted back to valid `.d.ts` by:
-//! - Extracting the original declaration source from comments
+//! - Extracting the original declaration source from string literals
+//! - Extracting source file and line info for sourcemap generation
 //! - Fixing import/export paths to use `.js` extensions
 //! - Reassembling the declarations into a valid `.d.ts` file
 
@@ -35,8 +37,15 @@ use oxc::ast::ast::{
 use oxc::ast_visit::{Visit, walk};
 use oxc::parser::Parser;
 use oxc::span::{GetSpan, SourceType};
+use rolldown_sourcemap::{SourceMap, SourceMapBuilder};
 
 use crate::resolver;
+
+/// Compute 0-indexed line number from byte offset in source code.
+#[expect(clippy::cast_possible_truncation)]
+fn line_number_from_offset(source: &str, offset: usize) -> u32 {
+  source[..offset.min(source.len())].matches('\n').count() as u32
+}
 
 /// Extract `/// <reference ... />` directives from the beginning of a `.d.ts` file.
 fn extract_reference_directives(code: &str) -> Vec<&str> {
@@ -85,6 +94,7 @@ pub fn dts_to_fake_js(dts_code: &str, filename: &str, id_counter: &AtomicU32) ->
   for stmt in &program.body {
     let stmt_start = stmt.span().start as usize;
     let stmt_end = stmt.span().end as usize;
+    let source_line = line_number_from_offset(dts_code, stmt_start);
 
     match stmt {
       Statement::TSTypeAliasDeclaration(decl) => {
@@ -92,7 +102,7 @@ pub fn dts_to_fake_js(dts_code: &str, filename: &str, id_counter: &AtomicU32) ->
         let id = id_counter.fetch_add(1, Ordering::Relaxed);
         let deps = collect_type_deps_from_source(dts_code, stmt_start, stmt_end);
         let original_source = &dts_code[stmt_start..stmt_end];
-        write_fake_var(&mut output, name, id, &deps, original_source);
+        write_fake_var(&mut output, name, id, &deps, original_source, filename, source_line);
       }
 
       Statement::TSInterfaceDeclaration(decl) => {
@@ -100,7 +110,7 @@ pub fn dts_to_fake_js(dts_code: &str, filename: &str, id_counter: &AtomicU32) ->
         let id = id_counter.fetch_add(1, Ordering::Relaxed);
         let deps = collect_type_deps_from_source(dts_code, stmt_start, stmt_end);
         let original_source = &dts_code[stmt_start..stmt_end];
-        write_fake_var(&mut output, name, id, &deps, original_source);
+        write_fake_var(&mut output, name, id, &deps, original_source, filename, source_line);
       }
 
       Statement::TSEnumDeclaration(decl) => {
@@ -108,7 +118,7 @@ pub fn dts_to_fake_js(dts_code: &str, filename: &str, id_counter: &AtomicU32) ->
         let id = id_counter.fetch_add(1, Ordering::Relaxed);
         let deps = collect_type_deps_from_source(dts_code, stmt_start, stmt_end);
         let original_source = &dts_code[stmt_start..stmt_end];
-        write_fake_var(&mut output, name, id, &deps, original_source);
+        write_fake_var(&mut output, name, id, &deps, original_source, filename, source_line);
       }
 
       Statement::ClassDeclaration(decl) => {
@@ -117,7 +127,7 @@ pub fn dts_to_fake_js(dts_code: &str, filename: &str, id_counter: &AtomicU32) ->
           let id = id_counter.fetch_add(1, Ordering::Relaxed);
           let deps = collect_type_deps_from_source(dts_code, stmt_start, stmt_end);
           let original_source = &dts_code[stmt_start..stmt_end];
-          write_fake_var(&mut output, name, id, &deps, original_source);
+          write_fake_var(&mut output, name, id, &deps, original_source, filename, source_line);
         }
       }
 
@@ -128,7 +138,7 @@ pub fn dts_to_fake_js(dts_code: &str, filename: &str, id_counter: &AtomicU32) ->
             let id = id_counter.fetch_add(1, Ordering::Relaxed);
             let deps = collect_type_deps_from_source(dts_code, stmt_start, stmt_end);
             let original_source = &dts_code[stmt_start..stmt_end];
-            write_fake_var(&mut output, name, id, &deps, original_source);
+            write_fake_var(&mut output, name, id, &deps, original_source, filename, source_line);
           }
         }
       }
@@ -139,7 +149,7 @@ pub fn dts_to_fake_js(dts_code: &str, filename: &str, id_counter: &AtomicU32) ->
           let id = id_counter.fetch_add(1, Ordering::Relaxed);
           let deps = collect_type_deps_from_source(dts_code, stmt_start, stmt_end);
           let original_source = &dts_code[stmt_start..stmt_end];
-          write_fake_var(&mut output, name, id, &deps, original_source);
+          write_fake_var(&mut output, name, id, &deps, original_source, filename, source_line);
         }
       }
 
@@ -151,7 +161,7 @@ pub fn dts_to_fake_js(dts_code: &str, filename: &str, id_counter: &AtomicU32) ->
         let id = id_counter.fetch_add(1, Ordering::Relaxed);
         let deps = collect_type_deps_from_source(dts_code, stmt_start, stmt_end);
         let original_source = &dts_code[stmt_start..stmt_end];
-        write_fake_var(&mut output, &name, id, &deps, original_source);
+        write_fake_var(&mut output, &name, id, &deps, original_source, filename, source_line);
       }
 
       Statement::ExportNamedDeclaration(export_decl) => {
@@ -164,6 +174,7 @@ pub fn dts_to_fake_js(dts_code: &str, filename: &str, id_counter: &AtomicU32) ->
             stmt_start,
             stmt_end,
             id_counter,
+            filename,
           );
         } else if let Some(source) = &export_decl.source {
           // Re-export from another module: `export { Foo } from './other'`
@@ -203,7 +214,15 @@ pub fn dts_to_fake_js(dts_code: &str, filename: &str, id_counter: &AtomicU32) ->
         writeln!(output, "/* __DTS_PASSTHROUGH__:{} */", escape_comment(original_source)).ok();
         let id = id_counter.fetch_add(1, Ordering::Relaxed);
         let deps = collect_type_deps_from_source(dts_code, stmt_start, stmt_end);
-        write_fake_var(&mut output, "__dts_default__", id, &deps, original_source);
+        write_fake_var(
+          &mut output,
+          "__dts_default__",
+          id,
+          &deps,
+          original_source,
+          filename,
+          source_line,
+        );
         default_export = Some("__dts_default__".to_string());
       }
 
@@ -266,6 +285,7 @@ pub fn dts_to_fake_js(dts_code: &str, filename: &str, id_counter: &AtomicU32) ->
 }
 
 /// Handle an exported declaration (inside `export { declaration }`).
+#[expect(clippy::too_many_arguments)]
 fn handle_exported_declaration(
   output: &mut String,
   exports: &mut Vec<ExportInfo>,
@@ -274,34 +294,36 @@ fn handle_exported_declaration(
   stmt_start: usize,
   stmt_end: usize,
   id_counter: &AtomicU32,
+  filename: &str,
 ) {
   let deps = collect_type_deps_from_source(dts_code, stmt_start, stmt_end);
   let original_source = &dts_code[stmt_start..stmt_end];
+  let source_line = line_number_from_offset(dts_code, stmt_start);
 
   match decl {
     Declaration::TSTypeAliasDeclaration(d) => {
       let name = d.id.name.as_str();
       let id = id_counter.fetch_add(1, Ordering::Relaxed);
-      write_fake_var(output, name, id, &deps, original_source);
+      write_fake_var(output, name, id, &deps, original_source, filename, source_line);
       exports.push(ExportInfo::named(name, true));
     }
     Declaration::TSInterfaceDeclaration(d) => {
       let name = d.id.name.as_str();
       let id = id_counter.fetch_add(1, Ordering::Relaxed);
-      write_fake_var(output, name, id, &deps, original_source);
+      write_fake_var(output, name, id, &deps, original_source, filename, source_line);
       exports.push(ExportInfo::named(name, true));
     }
     Declaration::TSEnumDeclaration(d) => {
       let name = d.id.name.as_str();
       let id = id_counter.fetch_add(1, Ordering::Relaxed);
-      write_fake_var(output, name, id, &deps, original_source);
+      write_fake_var(output, name, id, &deps, original_source, filename, source_line);
       exports.push(ExportInfo::named(name, false));
     }
     Declaration::ClassDeclaration(d) => {
       if let Some(ident) = &d.id {
         let name = ident.name.as_str();
         let id = id_counter.fetch_add(1, Ordering::Relaxed);
-        write_fake_var(output, name, id, &deps, original_source);
+        write_fake_var(output, name, id, &deps, original_source, filename, source_line);
         exports.push(ExportInfo::named(name, false));
       }
     }
@@ -310,7 +332,7 @@ fn handle_exported_declaration(
         if let BindingPattern::BindingIdentifier(ident) = &declarator.id {
           let name = ident.name.as_str();
           let id = id_counter.fetch_add(1, Ordering::Relaxed);
-          write_fake_var(output, name, id, &deps, original_source);
+          write_fake_var(output, name, id, &deps, original_source, filename, source_line);
           exports.push(ExportInfo::named(name, false));
         }
       }
@@ -319,7 +341,7 @@ fn handle_exported_declaration(
       if let Some(ident) = &d.id {
         let name = ident.name.as_str();
         let id = id_counter.fetch_add(1, Ordering::Relaxed);
-        write_fake_var(output, name, id, &deps, original_source);
+        write_fake_var(output, name, id, &deps, original_source, filename, source_line);
         exports.push(ExportInfo::named(name, false));
       }
     }
@@ -329,7 +351,7 @@ fn handle_exported_declaration(
         TSModuleDeclarationName::StringLiteral(lit) => lit.value.as_str().to_string(),
       };
       let id = id_counter.fetch_add(1, Ordering::Relaxed);
-      write_fake_var(output, &name, id, &deps, original_source);
+      write_fake_var(output, &name, id, &deps, original_source, filename, source_line);
       exports.push(ExportInfo { local_name: name.clone(), exported_name: name, is_type: false });
     }
     _ => {
@@ -385,14 +407,31 @@ fn write_import_specifiers(
   writeln!(output, "{import_js}").ok();
 }
 
+/// Information about a declaration extracted from fake JS, including source position.
+#[derive(Debug, Clone)]
+struct DeclSourceInfo {
+  /// The original declaration source code.
+  source: String,
+  /// The source file this declaration came from.
+  file: String,
+  /// The 0-indexed line number in the source file.
+  line: u32,
+}
+
 /// Convert bundled fake JS back to valid `.d.ts` declarations.
 ///
-/// This reads the `__DTS_DECL__`, `__DTS_PASSTHROUGH__`, and `__DTS_REFERENCE__` comments
-/// to reconstruct the original declarations, then fixes import/export extensions.
-pub fn fake_js_to_dts(fake_js_code: &str, _filename: &str) -> String {
+/// Returns (code, sourcemap) where sourcemap maps the output back to original sources.
+pub fn fake_js_to_dts(fake_js_code: &str, _output_filename: &str) -> (String, Option<SourceMap>) {
   let mut output = String::new();
   let mut reference_directives: Vec<String> = Vec::new();
   let mut seen_declarations: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
+
+  // Sourcemap builder for tracking source positions
+  let mut sourcemap_builder = SourceMapBuilder::default();
+  let mut current_line: u32 = 0;
+
+  // Track source IDs for each unique source file
+  let mut source_ids: rustc_hash::FxHashMap<String, u32> = rustc_hash::FxHashMap::default();
 
   // First pass: collect reference directives from fake variables
   // Format: var __dts_ref__ = ["__DTS_REF__", "/// <reference...>"];
@@ -402,9 +441,10 @@ pub fn fake_js_to_dts(fake_js_code: &str, _filename: &str) -> String {
     }
   }
 
-  // Emit reference directives at the top
+  // Emit reference directives at the top (no sourcemap for these)
   for directive in &reference_directives {
     writeln!(output, "{directive}").ok();
+    current_line += 1;
   }
 
   // Second pass: extract passthrough comments (line by line)
@@ -414,24 +454,50 @@ pub fn fake_js_to_dts(fake_js_code: &str, _filename: &str) -> String {
       let content = &trimmed[pt_marker + "__DTS_PASSTHROUGH__:".len()..];
       let content = content.strip_suffix("*/").unwrap_or(content).trim();
       let unescaped = unescape_comment(content);
+      #[expect(clippy::cast_possible_truncation)]
+      let line_count = unescaped.matches('\n').count() as u32 + 1;
       writeln!(output, "{unescaped}").ok();
+      current_line += line_count;
     }
   }
 
-  // Third pass: extract declaration sources from fake JS arrays
-  // These may be formatted across multiple lines by Rolldown
-  for source in extract_all_decl_sources(fake_js_code) {
+  // Third pass: extract declaration sources from fake JS arrays with source info
+  // Format: [id, () => deps, ["name"], "source", "file", line]
+  for decl_info in extract_all_decl_sources_with_info(fake_js_code) {
     // Skip reference directives (already handled above)
-    if source.starts_with("/// <reference") {
+    if decl_info.source.starts_with("/// <reference") {
       continue;
     }
-    if seen_declarations.insert(source.clone()) {
-      writeln!(output, "{source}").ok();
+    if seen_declarations.insert(decl_info.source.clone()) {
+      // Get or create source ID for this file (0 if no file info)
+      let source_id = if decl_info.file.is_empty() {
+        0
+      } else {
+        *source_ids
+          .entry(decl_info.file.clone())
+          .or_insert_with(|| sourcemap_builder.set_source_and_content(&decl_info.file, ""))
+      };
+
+      // Add sourcemap token for each line of the declaration
+      if !decl_info.file.is_empty() {
+        sourcemap_builder.add_token(current_line, 0, decl_info.line, 0, Some(source_id), None);
+      }
+
+      writeln!(output, "{}", decl_info.source).ok();
+      #[expect(clippy::cast_possible_truncation)]
+      let line_count = decl_info.source.matches('\n').count() as u32 + 1;
+      current_line += line_count;
     }
   }
 
   // Fix import/export extensions (.d.ts -> .js)
-  resolver::fix_output_extensions(&output)
+  let final_code = resolver::fix_output_extensions(&output);
+
+  // Build the sourcemap (only if we have actual source mappings)
+  let sourcemap =
+    if source_ids.is_empty() { None } else { Some(sourcemap_builder.into_sourcemap()) };
+
+  (final_code, sourcemap)
 }
 
 /// Information about an exported symbol.
@@ -450,23 +516,29 @@ impl ExportInfo {
 }
 
 /// Write a fake JS variable declaration that encodes a TypeScript declaration.
-/// The format is: `var name = [id, () => [deps], ["name"], "escaped_original_source"];`
-/// The original source is stored as a string at index 3 to survive Rolldown's code formatting.
+/// Format: `var name = [id, () => [deps], ["name"], "escaped_source", "source_file", line];`
+/// The source info (file + line) enables sourcemap generation during reconstruction.
 fn write_fake_var(
   output: &mut String,
   name: &str,
   id: u32,
   deps: &[String],
   original_source: &str,
+  source_file: &str,
+  source_line: u32,
 ) {
   let deps_str =
     if deps.is_empty() { String::from("[]") } else { format!("[{}]", deps.join(", ")) };
 
   // Escape the source for embedding as a JS string literal
   let escaped_source = escape_js_string(original_source);
+  let escaped_file = escape_js_string(source_file);
 
-  writeln!(output, "var {name} = [{id}, () => {deps_str}, [\"{name}\"], \"{escaped_source}\"];",)
-    .ok();
+  writeln!(
+    output,
+    "var {name} = [{id}, () => {deps_str}, [\"{name}\"], \"{escaped_source}\", \"{escaped_file}\", {source_line}];",
+  )
+  .ok();
 }
 
 /// Escape a string for use as a JavaScript string literal.
@@ -526,14 +598,14 @@ fn extract_reference_directives_from_fake_js(code: &str) -> Vec<String> {
   directives
 }
 
-/// Extract all declaration sources from fake JS code.
-/// The format is: `var NAME = [id, () => deps, ["name"], "escaped_source"];`
-/// Rolldown may reformat this across multiple lines, so we search the entire code.
-fn extract_all_decl_sources(code: &str) -> Vec<String> {
-  let mut sources = Vec::new();
+/// Extract all declaration sources with source position info from fake JS code.
+/// Format: `var NAME = [id, () => deps, ["name"], "source", "file", line];`
+/// Falls back to default values for legacy format without source info.
+fn extract_all_decl_sources_with_info(code: &str) -> Vec<DeclSourceInfo> {
+  let mut results = Vec::new();
 
   // Find all patterns like: ], followed by whitespace/newline, then "source"
-  // Pattern: ],\n\t"escaped_source"\n];
+  // Pattern: ],\n\t"escaped_source", "file", line\n];
   let mut search_start = 0;
   while let Some(pos) = code[search_start..].find("],") {
     let abs_pos = search_start + pos;
@@ -542,23 +614,65 @@ fn extract_all_decl_sources(code: &str) -> Vec<String> {
     let after_bracket = &code[abs_pos + 2..];
     let trimmed = after_bracket.trim_start();
 
-    // Check if next non-whitespace is a quote
+    // Check if next non-whitespace is a quote (source string)
     if let Some(quote_content) = trimmed.strip_prefix('"') {
-      // Find the matching quote and '];'
-      if let Some(source) = extract_quoted_string(quote_content) {
-        sources.push(source);
+      if let Some((source, rest)) = extract_quoted_string_with_rest(quote_content) {
+        // Try to extract file and line info
+        // Format after source: , "file", line];
+        let (file, line) = extract_source_info(rest);
+
+        results.push(DeclSourceInfo { source, file, line });
       }
     }
 
     search_start = abs_pos + 1;
   }
 
-  sources
+  results
+}
+
+/// Extract source file and line from the rest of a fake JS array.
+/// Input: `, "file", 42];` or similar
+fn extract_source_info(rest: &str) -> (String, u32) {
+  let trimmed = rest.trim_start();
+
+  // Expect: , "file", line
+  let Some(after_comma) = trimmed.strip_prefix(',') else {
+    return (String::new(), 0);
+  };
+
+  let trimmed = after_comma.trim_start();
+  let Some(quote_content) = trimmed.strip_prefix('"') else {
+    return (String::new(), 0);
+  };
+
+  let Some((file, rest)) = extract_quoted_string_with_rest(quote_content) else {
+    return (String::new(), 0);
+  };
+
+  // Extract line number
+  let trimmed = rest.trim_start();
+  let Some(after_comma) = trimmed.strip_prefix(',') else {
+    return (file, 0);
+  };
+
+  let trimmed = after_comma.trim_start();
+  // Parse digits until non-digit
+  let line_str: String = trimmed.chars().take_while(char::is_ascii_digit).collect();
+  let line = line_str.parse().unwrap_or(0);
+
+  (file, line)
 }
 
 /// Extract a quoted string, handling escape sequences.
 /// Input should start right after the opening quote.
 fn extract_quoted_string(content: &str) -> Option<String> {
+  extract_quoted_string_with_rest(content).map(|(s, _)| s)
+}
+
+/// Extract a quoted string and return the remaining text after the closing quote.
+/// Input should start right after the opening quote.
+fn extract_quoted_string_with_rest(content: &str) -> Option<(String, &str)> {
   let mut in_escape = false;
   let mut end_pos = None;
 
@@ -575,7 +689,8 @@ fn extract_quoted_string(content: &str) -> Option<String> {
 
   let end = end_pos?;
   let escaped_source = &content[..end];
-  Some(unescape_js_string(escaped_source))
+  let rest = &content[end + 1..]; // Skip the closing quote
+  Some((unescape_js_string(escaped_source), rest))
 }
 
 /// Collect type dependency names referenced in a span of `.d.ts` source.
@@ -713,7 +828,7 @@ mod tests {
     let dts = "export declare const x: number;\n";
     let counter = AtomicU32::new(0);
     let fake_js = dts_to_fake_js(dts, "test.d.ts", &counter).unwrap();
-    let reconstructed = fake_js_to_dts(&fake_js, "test.d.ts");
+    let (reconstructed, _map) = fake_js_to_dts(&fake_js, "test.d.ts");
 
     assert!(reconstructed.contains("export declare const x: number;"));
   }
@@ -753,7 +868,7 @@ export interface Foo {
     assert!(fake_js.contains("reference path=\\\"./global.d.ts\\\""));
 
     // Roundtrip should preserve reference directives at the top
-    let reconstructed = fake_js_to_dts(&fake_js, "test.d.ts");
+    let (reconstructed, _map) = fake_js_to_dts(&fake_js, "test.d.ts");
     assert!(reconstructed.contains("/// <reference types=\"node\""));
     assert!(reconstructed.contains("/// <reference path=\"./global.d.ts\""));
   }
@@ -777,7 +892,7 @@ export interface Foo {
     assert!(fake_js.contains("declare global"));
 
     // Roundtrip should preserve declare global
-    let reconstructed = fake_js_to_dts(&fake_js, "test.d.ts");
+    let (reconstructed, _map) = fake_js_to_dts(&fake_js, "test.d.ts");
     assert!(reconstructed.contains("declare global"));
     assert!(reconstructed.contains("interface Window"));
     assert!(reconstructed.contains("myProperty: string"));
