@@ -28,7 +28,12 @@ fn is_fake_dts_var(code: &str) -> bool {
   // Check for the array pattern with embedded source string
   // Rolldown may reformat this across lines, so we check the whole code
   // Look for: ["name"],\n\t"source" patterns (the last two elements of our array)
-  code.contains("\"],\n\t\"") || code.contains("\"],\n  \"") || code.contains("\"], \"")
+  // Also check for reference directives and ambient modules
+  code.contains("\"],\n\t\"")
+    || code.contains("\"],\n  \"")
+    || code.contains("\"], \"")
+    || code.contains("__DTS_REF__")
+    || code.contains("__DTS_AMBIENT__")
 }
 
 /// Convert a JS filename to its DTS equivalent.

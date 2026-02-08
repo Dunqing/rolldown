@@ -3,10 +3,6 @@ import { dtsPlugin } from 'rolldown/experimental';
 import { expect } from 'vitest';
 
 export default defineTest({
-  // Skip: ambient module declarations (declare module 'x') don't produce output
-  // because they don't have visible exports for the bundler to process.
-  // This is a known limitation of the current implementation.
-  skip: true,
   sequential: true,
   config: {
     input: 'main.ts',
@@ -20,6 +16,7 @@ export default defineTest({
     expect(dtsChunk).toBeDefined();
     // Should preserve declare module statement
     expect(dtsChunk!.code).toContain('declare module');
-    expect(dtsChunk!.code).toContain("'virtual'");
+    // Check for module name (quotes may be single or double)
+    expect(dtsChunk!.code).toMatch(/["']virtual["']/);
   },
 });

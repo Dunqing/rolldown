@@ -66,6 +66,7 @@ fn extract_reference_directives(code: &str) -> Vec<&str> {
 ///
 /// Each declaration is transformed into a variable assignment with dependency tracking,
 /// allowing Rolldown's bundler to handle tree-shaking and code splitting for types.
+#[expect(clippy::too_many_lines)]
 pub fn dts_to_fake_js(dts_code: &str, filename: &str, id_counter: &AtomicU32) -> Result<String> {
   let allocator = Allocator::new();
   let source_type = SourceType::d_ts();
@@ -80,6 +81,7 @@ pub fn dts_to_fake_js(dts_code: &str, filename: &str, id_counter: &AtomicU32) ->
   let mut output = String::new();
   let mut exports: Vec<ExportInfo> = Vec::new();
   let mut default_export: Option<String> = None;
+  let mut ambient_module_counter = 0u32;
 
   // Emit reference directives as exported fake variables (must be exported to avoid tree-shaking)
   for (i, directive) in extract_reference_directives(dts_code).into_iter().enumerate() {
@@ -154,14 +156,29 @@ pub fn dts_to_fake_js(dts_code: &str, filename: &str, id_counter: &AtomicU32) ->
       }
 
       Statement::TSModuleDeclaration(decl) => {
-        let name = match &decl.id {
-          TSModuleDeclarationName::Identifier(ident) => ident.name.as_str().to_string(),
-          TSModuleDeclarationName::StringLiteral(lit) => lit.value.as_str().to_string(),
-        };
-        let id = id_counter.fetch_add(1, Ordering::Relaxed);
-        let deps = collect_type_deps_from_source(dts_code, stmt_start, stmt_end);
         let original_source = &dts_code[stmt_start..stmt_end];
-        write_fake_var(&mut output, &name, id, &deps, original_source, filename, source_line);
+        match &decl.id {
+          TSModuleDeclarationName::Identifier(ident) => {
+            // Regular namespace declaration (e.g., `namespace Foo {}`)
+            let name = ident.name.as_str().to_string();
+            let id = id_counter.fetch_add(1, Ordering::Relaxed);
+            let deps = collect_type_deps_from_source(dts_code, stmt_start, stmt_end);
+            write_fake_var(&mut output, &name, id, &deps, original_source, filename, source_line);
+          }
+          TSModuleDeclarationName::StringLiteral(_) => {
+            // Ambient external module declaration (e.g., `declare module 'virtual' {}`)
+            // These declare types for other modules and should be passed through as-is
+            // Export as a variable to prevent tree-shaking
+            let idx = ambient_module_counter;
+            ambient_module_counter += 1;
+            writeln!(
+              output,
+              "export var __dts_ambient_{idx}__ = [\"__DTS_AMBIENT__\", \"{}\"];",
+              escape_js_string(original_source)
+            )
+            .ok();
+          }
+        }
       }
 
       Statement::ExportNamedDeclaration(export_decl) => {
@@ -346,13 +363,22 @@ fn handle_exported_declaration(
       }
     }
     Declaration::TSModuleDeclaration(d) => {
-      let name = match &d.id {
-        TSModuleDeclarationName::Identifier(ident) => ident.name.as_str().to_string(),
-        TSModuleDeclarationName::StringLiteral(lit) => lit.value.as_str().to_string(),
-      };
-      let id = id_counter.fetch_add(1, Ordering::Relaxed);
-      write_fake_var(output, &name, id, &deps, original_source, filename, source_line);
-      exports.push(ExportInfo { local_name: name.clone(), exported_name: name, is_type: false });
+      match &d.id {
+        TSModuleDeclarationName::Identifier(ident) => {
+          let name = ident.name.as_str().to_string();
+          let id = id_counter.fetch_add(1, Ordering::Relaxed);
+          write_fake_var(output, &name, id, &deps, original_source, filename, source_line);
+          exports.push(ExportInfo {
+            local_name: name.clone(),
+            exported_name: name,
+            is_type: false,
+          });
+        }
+        TSModuleDeclarationName::StringLiteral(_) => {
+          // Ambient external module declarations should be passed through
+          writeln!(output, "/* __DTS_PASSTHROUGH__:{} */", escape_comment(original_source)).ok();
+        }
+      }
     }
     _ => {
       writeln!(output, "/* __DTS_PASSTHROUGH__:{} */", escape_comment(original_source)).ok();
@@ -441,10 +467,22 @@ pub fn fake_js_to_dts(fake_js_code: &str, _output_filename: &str) -> (String, Op
     }
   }
 
+  // Collect ambient module declarations
+  // Format: var __dts_ambient__ = ["__DTS_AMBIENT__", "declare module 'x' {...}"];
+  let ambient_modules = extract_ambient_modules_from_fake_js(fake_js_code);
+
   // Emit reference directives at the top (no sourcemap for these)
   for directive in &reference_directives {
     writeln!(output, "{directive}").ok();
     current_line += 1;
+  }
+
+  // Emit ambient module declarations (no sourcemap for these)
+  for module_decl in &ambient_modules {
+    writeln!(output, "{module_decl}").ok();
+    #[expect(clippy::cast_possible_truncation)]
+    let line_count = module_decl.matches('\n').count() as u32 + 1;
+    current_line += line_count;
   }
 
   // Second pass: extract passthrough comments (line by line)
@@ -596,6 +634,30 @@ fn extract_reference_directives_from_fake_js(code: &str) -> Vec<String> {
   }
 
   directives
+}
+
+/// Extract ambient module declarations from fake variables.
+/// Format: `var __dts_ambient__ = ["__DTS_AMBIENT__", "declare module 'x' {...}"];`
+fn extract_ambient_modules_from_fake_js(code: &str) -> Vec<String> {
+  let mut modules = Vec::new();
+  let marker = "[\"__DTS_AMBIENT__\",";
+
+  let mut search_start = 0;
+  while let Some(pos) = code[search_start..].find(marker) {
+    let abs_pos = search_start + pos;
+    let after_marker = &code[abs_pos + marker.len()..];
+    let trimmed = after_marker.trim_start();
+
+    if let Some(quote_content) = trimmed.strip_prefix('"') {
+      if let Some(source) = extract_quoted_string(quote_content) {
+        modules.push(source);
+      }
+    }
+
+    search_start = abs_pos + marker.len();
+  }
+
+  modules
 }
 
 /// Extract all declaration sources with source position info from fake JS code.
