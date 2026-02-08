@@ -181,6 +181,20 @@ pub fn dts_to_fake_js(dts_code: &str, filename: &str, id_counter: &AtomicU32) ->
         }
       }
 
+      Statement::TSGlobalDeclaration(_) => {
+        // `declare global { ... }` augments the global scope
+        // Export as a variable to prevent tree-shaking
+        let original_source = &dts_code[stmt_start..stmt_end];
+        let idx = ambient_module_counter;
+        ambient_module_counter += 1;
+        writeln!(
+          output,
+          "export var __dts_ambient_{idx}__ = [\"__DTS_AMBIENT__\", \"{}\"];",
+          escape_js_string(original_source)
+        )
+        .ok();
+      }
+
       Statement::ExportNamedDeclaration(export_decl) => {
         if let Some(decl) = &export_decl.declaration {
           handle_exported_declaration(
