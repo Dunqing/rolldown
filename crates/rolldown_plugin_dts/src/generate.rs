@@ -358,6 +358,17 @@ impl Plugin for DtsPlugin {
       }));
     }
 
+    // Try loading a real .d.ts file if it exists on disk
+    // This handles imports of existing .d.ts files (not generated from .ts sources)
+    if let Ok(code) = std::fs::read_to_string(dts_path) {
+      return Ok(Some(HookLoadOutput {
+        code: ArcStr::from(code),
+        map: None,
+        module_type: Some(ModuleType::Custom("dts".to_string())),
+        side_effects: Some(HookSideEffects::False),
+      }));
+    }
+
     Ok(None)
   }
 
