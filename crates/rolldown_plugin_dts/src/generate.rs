@@ -93,6 +93,13 @@ impl DtsPlugin {
     Self { options, dts_map: DashMap::new(), declaration_id_counter: AtomicU32::new(0) }
   }
 
+  /// Returns the `HookSideEffects` value based on the `side_effects` option.
+  /// When `side_effects` is false (default), returns `Some(False)` for tree-shaking.
+  /// When `side_effects` is true, returns `None` to let Rolldown use its default behavior.
+  fn hook_side_effects(&self) -> Option<HookSideEffects> {
+    if self.options.side_effects { None } else { Some(HookSideEffects::False) }
+  }
+
   /// Generate `.d.ts` code from TypeScript source using Oxc isolated declarations.
   /// Returns (code, sourcemap) where sourcemap is present if `self.options.sourcemap` is true.
   fn generate_dts(
@@ -116,7 +123,9 @@ impl DtsPlugin {
 
     let ret = IsolatedDeclarations::new(
       &allocator,
-      IsolatedDeclarationsOptions { strip_internal: self.options.strip_internal },
+      IsolatedDeclarationsOptions {
+        strip_internal: self.options.compiler_options.strip_internal,
+      },
     )
     .build(&parser_ret.program);
 
@@ -201,7 +210,7 @@ impl Plugin for DtsPlugin {
       return Ok(Some(HookTransformOutput {
         code: Some(fake_js_code),
         module_type: Some(ModuleType::Js),
-        side_effects: Some(HookSideEffects::False),
+        side_effects: self.hook_side_effects(),
         ..Default::default()
       }));
     }
@@ -225,7 +234,7 @@ impl Plugin for DtsPlugin {
     if is_dts_virtual_id(specifier) {
       return Ok(Some(rolldown_plugin::HookResolveIdOutput {
         id: ArcStr::from(specifier),
-        side_effects: Some(HookSideEffects::False),
+        side_effects: self.hook_side_effects(),
         ..Default::default()
       }));
     }
@@ -251,7 +260,7 @@ impl Plugin for DtsPlugin {
           if self.dts_map.contains_key(&virtual_id) {
             return Ok(Some(rolldown_plugin::HookResolveIdOutput {
               id: ArcStr::from(virtual_id),
-              side_effects: Some(HookSideEffects::False),
+              side_effects: self.hook_side_effects(),
               ..Default::default()
             }));
           }
@@ -259,7 +268,7 @@ impl Plugin for DtsPlugin {
           let dts_specifier = source_to_dts(specifier);
           return Ok(Some(rolldown_plugin::HookResolveIdOutput {
             id: ArcStr::from(dts_specifier),
-            side_effects: Some(HookSideEffects::False),
+            side_effects: self.hook_side_effects(),
             ..Default::default()
           }));
         }
@@ -278,7 +287,7 @@ impl Plugin for DtsPlugin {
             if dts_path.exists() {
               return Ok(Some(rolldown_plugin::HookResolveIdOutput {
                 id: ArcStr::from(dts_path.to_string_lossy().to_string()),
-                side_effects: Some(HookSideEffects::False),
+                side_effects: self.hook_side_effects(),
                 ..Default::default()
               }));
             }
@@ -300,13 +309,13 @@ impl Plugin for DtsPlugin {
               let virtual_id = make_dts_virtual_id(&resolved_id);
               return Ok(Some(rolldown_plugin::HookResolveIdOutput {
                 id: ArcStr::from(virtual_id),
-                side_effects: Some(HookSideEffects::False),
+                side_effects: self.hook_side_effects(),
                 ..Default::default()
               }));
             }
             return Ok(Some(rolldown_plugin::HookResolveIdOutput {
               id: resolved_id,
-              side_effects: Some(HookSideEffects::False),
+              side_effects: self.hook_side_effects(),
               ..Default::default()
             }));
           }
@@ -324,7 +333,7 @@ impl Plugin for DtsPlugin {
             if index_dts.exists() {
               return Ok(Some(rolldown_plugin::HookResolveIdOutput {
                 id: ArcStr::from(index_dts.to_string_lossy().to_string()),
-                side_effects: Some(HookSideEffects::False),
+                side_effects: self.hook_side_effects(),
                 ..Default::default()
               }));
             }
@@ -340,7 +349,7 @@ impl Plugin for DtsPlugin {
             let virtual_id = make_dts_virtual_id(&ts_path.to_string_lossy());
             return Ok(Some(rolldown_plugin::HookResolveIdOutput {
               id: ArcStr::from(virtual_id),
-              side_effects: Some(HookSideEffects::False),
+              side_effects: self.hook_side_effects(),
               ..Default::default()
             }));
           }
@@ -348,7 +357,7 @@ impl Plugin for DtsPlugin {
           let dts_path = importer_dir.join(format!("{base_name}.d.ts"));
           return Ok(Some(rolldown_plugin::HookResolveIdOutput {
             id: ArcStr::from(dts_path.to_string_lossy().to_string()),
-            side_effects: Some(HookSideEffects::False),
+            side_effects: self.hook_side_effects(),
             ..Default::default()
           }));
         }
@@ -387,7 +396,7 @@ impl Plugin for DtsPlugin {
         code: ArcStr::from(dts_code),
         map,
         module_type: Some(ModuleType::Custom("dts".to_string())),
-        side_effects: Some(HookSideEffects::False),
+        side_effects: self.hook_side_effects(),
       }));
     }
 
@@ -399,7 +408,7 @@ impl Plugin for DtsPlugin {
         code: ArcStr::from(dts_code),
         map,
         module_type: Some(ModuleType::Custom("dts".to_string())),
-        side_effects: Some(HookSideEffects::False),
+        side_effects: self.hook_side_effects(),
       }));
     }
 
@@ -410,7 +419,7 @@ impl Plugin for DtsPlugin {
         code: ArcStr::from(code),
         map: None,
         module_type: Some(ModuleType::Custom("dts".to_string())),
-        side_effects: Some(HookSideEffects::False),
+        side_effects: self.hook_side_effects(),
       }));
     }
 
@@ -440,7 +449,8 @@ impl Plugin for DtsPlugin {
           let new_filename = convert_js_to_dts_filename(&chunk.filename);
 
           // Convert fake JS back to DTS with sourcemap
-          let (dts_code, dts_map) = fake_js::fake_js_to_dts(&chunk.code, &new_filename);
+          let (dts_code, dts_map) =
+            fake_js::fake_js_to_dts(&chunk.code, &new_filename, self.options.cjs_default);
           chunk.code = dts_code;
           chunk.filename = ArcStr::from(new_filename.clone());
 

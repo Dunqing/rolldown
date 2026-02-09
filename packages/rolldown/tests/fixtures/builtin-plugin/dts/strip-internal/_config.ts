@@ -6,7 +6,7 @@ export default defineTest({
   sequential: true,
   config: {
     input: 'main.ts',
-    plugins: [dtsPlugin({ stripInternal: true })],
+    plugins: [dtsPlugin({ compilerOptions: { stripInternal: true } })],
   },
   async afterTest(output) {
     const chunks = output.output.filter((o) => o.type === 'chunk');

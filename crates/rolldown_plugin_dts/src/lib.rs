@@ -5,4 +5,4 @@ mod resolver;
 mod utils;
 
 pub use generate::DtsPlugin;
-pub use options::DtsPluginOptions;
+pub use options::{DtsCompilerOptions, DtsPluginOptions};

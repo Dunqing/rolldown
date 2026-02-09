@@ -488,8 +488,15 @@ struct DeclSourceInfo {
 
 /// Convert bundled fake JS back to valid `.d.ts` declarations.
 ///
+/// When `cjs_default` is true, a single `export { x as default }` will be
+/// converted to `export = x` for CommonJS compatibility.
+///
 /// Returns (code, sourcemap) where sourcemap maps the output back to original sources.
-pub fn fake_js_to_dts(fake_js_code: &str, _output_filename: &str) -> (String, Option<SourceMap>) {
+pub fn fake_js_to_dts(
+  fake_js_code: &str,
+  _output_filename: &str,
+  cjs_default: bool,
+) -> (String, Option<SourceMap>) {
   let mut output = String::new();
   let mut reference_directives: Vec<String> = Vec::new();
   let mut seen_declarations: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
@@ -571,7 +578,13 @@ pub fn fake_js_to_dts(fake_js_code: &str, _output_filename: &str) -> (String, Op
   }
 
   // Fix import/export extensions (.d.ts -> .js)
-  let final_code = resolver::fix_output_extensions(&output);
+  let mut final_code = resolver::fix_output_extensions(&output);
+
+  // When cjs_default is enabled, convert `export { x as default }` to `export = x`
+  // Only applies when there is a single default export specifier
+  if cjs_default {
+    final_code = apply_cjs_default(&final_code);
+  }
 
   // Build the sourcemap (only if we have actual source mappings)
   let sourcemap =
@@ -900,6 +913,46 @@ fn unescape_comment(s: &str) -> String {
   s.replace("*\\/", "*/").replace("\\n", "\n")
 }
 
+/// Apply CJS default export conversion.
+///
+/// Converts `export { x as default };` (single specifier) to `export = x;`.
+/// This matches the behavior of rolldown-plugin-dts's `cjsDefault` option.
+fn apply_cjs_default(code: &str) -> String {
+  let mut result = String::with_capacity(code.len());
+  let mut remaining = code;
+
+  while let Some(pos) = remaining.find("export {") {
+    result.push_str(&remaining[..pos]);
+    let after_export = &remaining[pos + "export {".len()..];
+    let trimmed = after_export.trim_start();
+
+    // Try to match: <identifier> as default };
+    if let Some(as_pos) = trimmed.find(" as default") {
+      let ident = trimmed[..as_pos].trim();
+      let after_default = &trimmed[as_pos + " as default".len()..];
+      let after_default = after_default.trim_start();
+
+      // Check ident is a single word (no commas = single specifier)
+      if !ident.is_empty()
+        && !ident.contains(',')
+        && ident.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+        && after_default.starts_with("};")
+      {
+        write!(result, "export = {ident};").ok();
+        remaining = &after_default["};".len()..];
+        continue;
+      }
+    }
+
+    // Not a match, keep the original
+    result.push_str("export {");
+    remaining = after_export;
+  }
+
+  result.push_str(remaining);
+  result
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -932,7 +985,7 @@ mod tests {
     let dts = "export declare const x: number;\n";
     let counter = AtomicU32::new(0);
     let fake_js = dts_to_fake_js(dts, "test.d.ts", &counter).unwrap();
-    let (reconstructed, _map) = fake_js_to_dts(&fake_js, "test.d.ts");
+    let (reconstructed, _map) = fake_js_to_dts(&fake_js, "test.d.ts", false);
 
     assert!(reconstructed.contains("export declare const x: number;"));
   }
@@ -972,7 +1025,7 @@ export interface Foo {
     assert!(fake_js.contains("reference path=\\\"./global.d.ts\\\""));
 
     // Roundtrip should preserve reference directives at the top
-    let (reconstructed, _map) = fake_js_to_dts(&fake_js, "test.d.ts");
+    let (reconstructed, _map) = fake_js_to_dts(&fake_js, "test.d.ts", false);
     assert!(reconstructed.contains("/// <reference types=\"node\""));
     assert!(reconstructed.contains("/// <reference path=\"./global.d.ts\""));
   }
@@ -996,9 +1049,23 @@ export interface Foo {
     assert!(fake_js.contains("declare global"));
 
     // Roundtrip should preserve declare global
-    let (reconstructed, _map) = fake_js_to_dts(&fake_js, "test.d.ts");
+    let (reconstructed, _map) = fake_js_to_dts(&fake_js, "test.d.ts", false);
     assert!(reconstructed.contains("declare global"));
     assert!(reconstructed.contains("interface Window"));
     assert!(reconstructed.contains("myProperty: string"));
+  }
+
+  #[test]
+  fn test_apply_cjs_default() {
+    assert_eq!(
+      apply_cjs_default("export { Foo as default };"),
+      "export = Foo;"
+    );
+    // Should not convert when multiple specifiers
+    let multi = "export { Foo, Bar as default };";
+    assert_eq!(apply_cjs_default(multi), multi);
+    // Should not convert when not exporting as default
+    let named = "export { Foo as Bar };";
+    assert_eq!(apply_cjs_default(named), named);
   }
 }

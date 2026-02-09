@@ -1807,13 +1807,31 @@ export interface BindingDevWatchOptions {
   debounceTickRate?: number
 }
 
-export interface BindingDtsPluginConfig {
-  /** Whether to strip `@internal` annotated declarations. */
+export interface BindingDtsCompilerOptions {
+  /**
+   * Whether to strip `@internal` annotated declarations.
+   * Corresponds to TypeScript's `compilerOptions.stripInternal`.
+   */
   stripInternal?: boolean
+}
+
+export interface BindingDtsPluginConfig {
   /** Whether to emit only `.d.ts` files (remove JS chunks from output). */
   emitDtsOnly?: boolean
   /** Whether to generate source maps for declaration files. */
   sourcemap?: boolean
+  /**
+   * If `true`, convert a single `export { x as default }` to `export = x`
+   * in the output for CommonJS compatibility.
+   */
+  cjsDefault?: boolean
+  /**
+   * Whether the generated `.d.ts` files have side effects.
+   * If `false` (default), Rolldown treats `.d.ts` files as side-effect-free during tree-shaking.
+   */
+  sideEffects?: boolean
+  /** Override TypeScript `compilerOptions` relevant to DTS generation. */
+  compilerOptions?: BindingDtsCompilerOptions
 }
 
 export interface BindingEmittedAsset {
