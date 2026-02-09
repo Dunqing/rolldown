@@ -314,7 +314,24 @@ impl Plugin for DtsPlugin {
           // If normal resolution fails, compute absolute path
           let importer_dir =
             std::path::Path::new(&real_importer).parent().unwrap_or(std::path::Path::new("."));
-          let base_name = &specifier[2..]; // strip "./"
+
+          // For directory imports ("." or ".."), resolve to index file
+          let is_dir_import = specifier == "." || specifier == ".." || specifier.ends_with("/.");
+          if is_dir_import {
+            let dir = importer_dir.join(specifier);
+            // Try index.d.ts first (for real .d.ts importers)
+            let index_dts = dir.join("index.d.ts");
+            if index_dts.exists() {
+              return Ok(Some(rolldown_plugin::HookResolveIdOutput {
+                id: ArcStr::from(index_dts.to_string_lossy().to_string()),
+                side_effects: Some(HookSideEffects::False),
+                ..Default::default()
+              }));
+            }
+          }
+
+          // Strip leading "./" for file-based resolution
+          let base_name = specifier.strip_prefix("./").unwrap_or(specifier);
 
           // For virtual DTS importers, resolve to virtual DTS ID
           // For real .d.ts importers, resolve to .d.ts file

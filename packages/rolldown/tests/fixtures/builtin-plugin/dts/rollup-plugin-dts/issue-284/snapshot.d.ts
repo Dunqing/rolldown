@@ -1,10 +1,7 @@
-// index.d.ts
-//#region tests/rollup-plugin-dts/issue-284/index.d.ts
-interface MyInterface {
+// index.d.d.ts.d.ts
+export interface MyInterface {
   a: string;
 }
-declare namespace MyInterface {
+export namespace MyInterface {
   export const b: string;
 }
-//#endregion
-export { MyInterface };

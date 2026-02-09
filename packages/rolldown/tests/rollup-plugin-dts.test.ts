@@ -39,15 +39,6 @@ const skipTests = new Set([
   'reference-path-remapping-should-not-touch-absolute-path', // needs tsconfig-based path resolution
   'issue-101-allow-js', // needs allowJs tsconfig option
   'inline-external-node-next-module', // needs moduleResolution: nodenext
-  // The following need fake_js to handle TS declaration merging (same name exported as both type and value)
-  'issue-87', // interface + const with same name (declaration merging)
-  'issue-284', // interface + namespace with same name (declaration merging)
-  'issue-89-import-equals', // import = require() syntax not supported in fake_js
-  'namespace-definition', // function + namespace with same name (declaration merging)
-  'namespace-definition-rename', // function + namespace with same name
-  'overrides-with-rename', // duplicate exports from declaration merging
-  // Resolution edge cases
-  'circular-to-entry', // import from "." causes resolution hang
 ]);
 
 for (const entryFile of entryFiles) {

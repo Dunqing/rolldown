@@ -32,7 +32,8 @@ use anyhow::Result;
 use oxc::allocator::Allocator;
 use oxc::ast::ast::{
   BindingPattern, Declaration, ImportDeclarationSpecifier, ImportOrExportKind, Statement,
-  TSModuleDeclarationName, TSTypeName, TSTypeQuery, TSTypeQueryExprName, TSTypeReference,
+  TSModuleDeclarationName, TSModuleReference, TSTypeName, TSTypeQuery, TSTypeQueryExprName,
+  TSTypeReference,
 };
 use oxc::ast_visit::{Visit, walk};
 use oxc::parser::Parser;
@@ -282,6 +283,27 @@ pub fn dts_to_fake_js(dts_code: &str, filename: &str, id_counter: &AtomicU32) ->
         }
       }
 
+      Statement::TSImportEqualsDeclaration(decl) => {
+        let original_source = &dts_code[stmt_start..stmt_end];
+        writeln!(output, "/* __DTS_PASSTHROUGH__:{} */", escape_comment(original_source)).ok();
+        let name = decl.id.name.as_str();
+        // Convert `import Foo = require("./bar")` to `import { default as Foo } from './bar'`
+        if let TSModuleReference::ExternalModuleReference(ext_ref) = &decl.module_reference {
+          let source = ext_ref.expression.value.as_str();
+          writeln!(output, "import {{ default as {name} }} from '{source}';").ok();
+        }
+      }
+
+      Statement::TSExportAssignment(export_assign) => {
+        let original_source = &dts_code[stmt_start..stmt_end];
+        writeln!(output, "/* __DTS_PASSTHROUGH__:{} */", escape_comment(original_source)).ok();
+        // Convert `export = Foo` to `export default Foo`
+        // Extract the identifier name from the expression
+        let expr_source = &dts_code[export_assign.expression.span().start as usize
+          ..export_assign.expression.span().end as usize];
+        writeln!(output, "export default {expr_source};").ok();
+      }
+
       _ => {
         let original_source = &dts_code[stmt_start..stmt_end];
         if !original_source.trim().is_empty() {
@@ -291,13 +313,19 @@ pub fn dts_to_fake_js(dts_code: &str, filename: &str, id_counter: &AtomicU32) ->
     }
   }
 
-  // Write export statement for all collected exports
+  // Write export statement for all collected exports (deduplicate by exported name)
   if !exports.is_empty() {
+    let mut seen = std::collections::HashSet::new();
     let mut export_stmt = String::from("export { ");
-    for (i, exp) in exports.iter().enumerate() {
-      if i > 0 {
+    let mut first = true;
+    for exp in &exports {
+      if !seen.insert(&exp.exported_name) {
+        continue;
+      }
+      if !first {
         export_stmt.push_str(", ");
       }
+      first = false;
       if exp.local_name == exp.exported_name {
         export_stmt.push_str(&exp.local_name);
       } else {
