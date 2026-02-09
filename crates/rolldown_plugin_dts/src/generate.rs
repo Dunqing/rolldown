@@ -264,10 +264,33 @@ impl Plugin for DtsPlugin {
           }));
         }
 
+        // For relative imports with .js/.mjs/.cjs extensions, resolve to corresponding .d.ts
+        if specifier.starts_with('.') {
+          let dts_specifier = specifier
+            .strip_suffix(".js")
+            .map(|stem| format!("{stem}.d.ts"))
+            .or_else(|| specifier.strip_suffix(".mjs").map(|stem| format!("{stem}.d.mts")))
+            .or_else(|| specifier.strip_suffix(".cjs").map(|stem| format!("{stem}.d.cts")));
+          if let Some(dts_specifier) = dts_specifier {
+            let importer_dir =
+              std::path::Path::new(&real_importer).parent().unwrap_or(std::path::Path::new("."));
+            let dts_path = importer_dir.join(&dts_specifier);
+            if dts_path.exists() {
+              return Ok(Some(rolldown_plugin::HookResolveIdOutput {
+                id: ArcStr::from(dts_path.to_string_lossy().to_string()),
+                side_effects: Some(HookSideEffects::False),
+                ..Default::default()
+              }));
+            }
+          }
+        }
+
         // For relative imports without extensions, try to resolve as .d.ts
         // Check if the specifier has no file extension (last path segment has no dot)
-        let is_extensionless =
-          specifier.starts_with('.') && !specifier.rsplit('/').next().unwrap_or("").contains('.');
+        // Note: "." and ".." are directory imports and count as extensionless
+        let last_segment = specifier.rsplit('/').next().unwrap_or("");
+        let is_extensionless = specifier.starts_with('.')
+          && (last_segment == "." || last_segment == ".." || !last_segment.contains('.'));
         if is_extensionless {
           // First, try the normal resolver with the source importer path
           if let Ok(Ok(resolved)) = ctx.resolve(specifier, Some(&real_importer), None).await {

@@ -1,0 +1,19 @@
+// index.d.d.ts.d.ts
+export type Getters<T> = {
+  [K in keyof T as `get${Capitalize<string & K>}`]: () => T[K];
+};
+export type MyExclude<T, U> = T extends U ? never : T;
+interface Person {
+  name: string;
+  age: number;
+  location: string;
+}
+export type LazyPerson = Getters<Person>;
+type RemoveKindField<T> = {
+  [K in keyof T as MyExclude<K, "kind">]: T[K];
+};
+interface Circle {
+  kind: "circle";
+  radius: number;
+}
+export type KindlessCircle = RemoveKindField<Circle>;
