@@ -8,7 +8,9 @@ use oxc::{
   codegen::{Codegen, CodegenOptions},
   isolated_declarations::{IsolatedDeclarations, IsolatedDeclarationsOptions},
 };
-use rolldown_common::{EmittedChunk, ModuleType, Output, side_effects::HookSideEffects};
+use rolldown_common::{
+  EmittedChunk, ModuleType, Output, WatcherChangeKind, side_effects::HookSideEffects,
+};
 use rolldown_error::{BatchedBuildDiagnostic, BuildDiagnostic, EventKind, Severity};
 use rolldown_plugin::{
   HookLoadOutput, HookRenderChunkArgs, HookRenderChunkOutput, HookTransformOutput, HookUsage,
@@ -473,11 +475,29 @@ impl Plugin for DtsPlugin {
     Ok(())
   }
 
+  // --- Watch hooks ---
+
+  /// Invalidate stale `dts_map` entries when source files change or are deleted.
+  async fn watch_change(
+    &self,
+    _ctx: &rolldown_plugin::PluginContext,
+    path: &str,
+    event: WatcherChangeKind,
+  ) -> rolldown_plugin::HookNoopReturn {
+    if matches!(event, WatcherChangeKind::Update | WatcherChangeKind::Delete) {
+      let virtual_id = make_dts_virtual_id(path);
+      self.dts_map.remove(&virtual_id);
+      self.dts_map.remove(path);
+    }
+    Ok(())
+  }
+
   fn register_hook_usage(&self) -> HookUsage {
     HookUsage::Transform
       | HookUsage::ResolveId
       | HookUsage::Load
       | HookUsage::RenderChunk
       | HookUsage::GenerateBundle
+      | HookUsage::WatchChange
   }
 }

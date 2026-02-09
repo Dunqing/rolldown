@@ -31,9 +31,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use anyhow::Result;
 use oxc::allocator::Allocator;
 use oxc::ast::ast::{
-  BindingPattern, Declaration, ImportDeclarationSpecifier, Statement,
-  TSModuleDeclarationName, TSModuleReference, TSTypeName, TSTypeQuery, TSTypeQueryExprName,
-  TSTypeReference,
+  BindingPattern, Declaration, ImportDeclarationSpecifier, Statement, TSConditionalType,
+  TSModuleDeclarationName, TSModuleReference, TSType, TSTypeName, TSTypeQuery,
+  TSTypeQueryExprName, TSTypeReference,
 };
 use oxc::ast_visit::{Visit, walk};
 use oxc::parser::Parser;
@@ -697,7 +697,7 @@ fn collect_type_deps_from_source(source: &str, start: usize, end: usize) -> Vec<
     return vec![];
   }
 
-  let mut collector = TypeDepCollector { deps: Vec::new() };
+  let mut collector = TypeDepCollector { deps: Vec::new(), inferred: rustc_hash::FxHashSet::default() };
   collector.visit_program(&parser_ret.program);
 
   collector.deps.sort();
@@ -708,13 +708,40 @@ fn collect_type_deps_from_source(source: &str, start: usize, end: usize) -> Vec<
 /// AST visitor that collects type reference identifiers.
 struct TypeDepCollector {
   deps: Vec<String>,
+  /// Names introduced by `infer T` in conditional types, excluded from deps.
+  inferred: rustc_hash::FxHashSet<String>,
+}
+
+/// Extract the leftmost (root) identifier from a possibly-qualified type name.
+/// e.g. `Foo.Bar.Baz` -> `Foo`
+fn get_root_identifier_name<'a>(type_name: &TSTypeName<'a>) -> Option<&'a str> {
+  match type_name {
+    TSTypeName::IdentifierReference(ident) => Some(ident.name.as_str()),
+    TSTypeName::QualifiedName(qualified) => get_root_identifier_name(&qualified.left),
+    TSTypeName::ThisExpression(_) => None,
+  }
+}
+
+/// Collect all `infer T` type parameter names from a type subtree.
+fn collect_inferred_names(ty: &TSType<'_>) -> Vec<String> {
+  struct InferCollector {
+    names: Vec<String>,
+  }
+  impl<'a> Visit<'a> for InferCollector {
+    fn visit_ts_infer_type(&mut self, it: &oxc::ast::ast::TSInferType<'a>) {
+      self.names.push(it.type_parameter.name.name.as_str().to_string());
+      walk::walk_ts_infer_type(self, it);
+    }
+  }
+  let mut collector = InferCollector { names: Vec::new() };
+  collector.visit_ts_type(ty);
+  collector.names
 }
 
 impl<'a> Visit<'a> for TypeDepCollector {
   fn visit_ts_type_reference(&mut self, it: &TSTypeReference<'a>) {
-    if let TSTypeName::IdentifierReference(ident) = &it.type_name {
-      let name = ident.name.as_str();
-      if !is_builtin_type(name) {
+    if let Some(name) = get_root_identifier_name(&it.type_name) {
+      if !is_builtin_type(name) && !self.inferred.contains(name) {
         self.deps.push(name.to_string());
       }
     }
@@ -722,13 +749,43 @@ impl<'a> Visit<'a> for TypeDepCollector {
   }
 
   fn visit_ts_type_query(&mut self, it: &TSTypeQuery<'a>) {
-    if let TSTypeQueryExprName::IdentifierReference(ident) = &it.expr_name {
-      let name = ident.name.as_str();
-      if !is_builtin_type(name) {
-        self.deps.push(name.to_string());
+    match &it.expr_name {
+      TSTypeQueryExprName::IdentifierReference(ident) => {
+        let name = ident.name.as_str();
+        if !is_builtin_type(name) && !self.inferred.contains(name) {
+          self.deps.push(name.to_string());
+        }
       }
+      TSTypeQueryExprName::QualifiedName(qualified) => {
+        if let Some(name) = get_root_identifier_name(&qualified.left) {
+          if !is_builtin_type(name) && !self.inferred.contains(name) {
+            self.deps.push(name.to_string());
+          }
+        }
+      }
+      _ => {}
     }
     walk::walk_ts_type_query(self, it);
+  }
+
+  fn visit_ts_conditional_type(&mut self, it: &TSConditionalType<'a>) {
+    // Visit check_type normally
+    self.visit_ts_type(&it.check_type);
+
+    // Collect inferred names from extends_type (e.g. `infer U` in `Array<infer U>`)
+    let inferred_names = collect_inferred_names(&it.extends_type);
+
+    // Visit extends_type normally
+    self.visit_ts_type(&it.extends_type);
+
+    // Add inferred names to exclusion set, then visit true_type
+    let prev_inferred: rustc_hash::FxHashSet<String> = self.inferred.clone();
+    self.inferred.extend(inferred_names);
+    self.visit_ts_type(&it.true_type);
+
+    // Restore previous inferred set for false_type (inferred names NOT in scope)
+    self.inferred = prev_inferred;
+    self.visit_ts_type(&it.false_type);
   }
 }
 
@@ -940,5 +997,59 @@ export interface Foo {
     // Should not convert when not exporting as default
     let named = "export { Foo as Bar };";
     assert_eq!(apply_cjs_default(named), named);
+  }
+
+  #[test]
+  fn test_qualified_type_name_deps() {
+    // Foo.Bar should track Foo as a dependency
+    let dts = "type X = Foo.Bar;\n";
+    let counter = AtomicU32::new(0);
+    let result = dts_to_fake_js(dts, "test.d.ts", &counter).unwrap();
+    assert!(result.contains("Foo"), "qualified name root should be tracked: {result}");
+  }
+
+  #[test]
+  fn test_deeply_qualified_type_name_deps() {
+    // A.B.C should track A as a dependency
+    let dts = "type X = A.B.C;\n";
+    let deps = collect_type_deps_from_source(dts, 0, dts.len());
+    assert!(deps.contains(&"A".to_string()), "deeply qualified name root should be tracked: {deps:?}");
+  }
+
+  #[test]
+  fn test_conditional_type_infer_not_tracked() {
+    // `infer U` should NOT be tracked as a dependency in the true branch
+    let dts = "type Unwrap<T> = T extends Array<infer U> ? U : T;\n";
+    let deps = collect_type_deps_from_source(dts, 0, dts.len());
+    assert!(!deps.contains(&"U".to_string()), "inferred U should not be a dep: {deps:?}");
+    // T should still be tracked (it's a type param reference used in the type)
+    assert!(deps.contains(&"T".to_string()), "T should be a dep: {deps:?}");
+  }
+
+  #[test]
+  fn test_conditional_type_non_inferred_tracked() {
+    // External type in true branch should still be tracked
+    let dts = "type X<T> = T extends infer U ? Wrapper<U> : Default;\n";
+    let deps = collect_type_deps_from_source(dts, 0, dts.len());
+    assert!(!deps.contains(&"U".to_string()), "inferred U should not be a dep: {deps:?}");
+    assert!(deps.contains(&"Wrapper".to_string()), "Wrapper should be a dep: {deps:?}");
+    assert!(deps.contains(&"Default".to_string()), "Default in false branch should be a dep: {deps:?}");
+  }
+
+  #[test]
+  fn test_conditional_type_infer_scoped_to_true_branch() {
+    // `infer U` should NOT suppress U in the false branch (U is not in scope there)
+    let dts = "type X<T> = T extends Array<infer U> ? U : U;\n";
+    let deps = collect_type_deps_from_source(dts, 0, dts.len());
+    // U appears in false branch where it's NOT inferred, so it should be tracked
+    assert!(deps.contains(&"U".to_string()), "U in false branch should be a dep: {deps:?}");
+  }
+
+  #[test]
+  fn test_typeof_qualified_name_deps() {
+    // `typeof Foo.bar` should track Foo as a dependency
+    let dts = "type X = typeof Foo.bar;\n";
+    let deps = collect_type_deps_from_source(dts, 0, dts.len());
+    assert!(deps.contains(&"Foo".to_string()), "typeof qualified name root should be tracked: {deps:?}");
   }
 }
