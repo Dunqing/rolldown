@@ -1,4 +1,4 @@
-// index.d.d.ts.d.ts
+// index.d.d.ts
 interface Bar {}
 export interface Foo {
   bar: Bar;

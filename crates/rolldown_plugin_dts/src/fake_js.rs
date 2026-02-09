@@ -38,7 +38,6 @@ use oxc::ast::ast::{
 use oxc::ast_visit::{Visit, walk};
 use oxc::parser::Parser;
 use oxc::span::{GetSpan, SourceType};
-use rolldown_sourcemap::{SourceMap, SourceMapBuilder};
 
 use crate::resolver;
 
@@ -475,38 +474,21 @@ fn write_import_specifiers(
   writeln!(output, "{import_js}").ok();
 }
 
-/// Information about a declaration extracted from fake JS, including source position.
+/// Information about a declaration extracted from fake JS.
 #[derive(Debug, Clone)]
 struct DeclSourceInfo {
   /// The original declaration source code.
   source: String,
-  /// The source file this declaration came from.
-  file: String,
-  /// The 0-indexed line number in the source file.
-  line: u32,
 }
 
 /// Convert bundled fake JS back to valid `.d.ts` declarations.
 ///
 /// When `cjs_default` is true, a single `export { x as default }` will be
 /// converted to `export = x` for CommonJS compatibility.
-///
-/// Returns (code, sourcemap) where sourcemap maps the output back to original sources.
-pub fn fake_js_to_dts(
-  fake_js_code: &str,
-  _output_filename: &str,
-  cjs_default: bool,
-) -> (String, Option<SourceMap>) {
+pub fn fake_js_to_dts(fake_js_code: &str, cjs_default: bool) -> String {
   let mut output = String::new();
   let mut reference_directives: Vec<String> = Vec::new();
   let mut seen_declarations: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
-
-  // Sourcemap builder for tracking source positions
-  let mut sourcemap_builder = SourceMapBuilder::default();
-  let mut current_line: u32 = 0;
-
-  // Track source IDs for each unique source file
-  let mut source_ids: rustc_hash::FxHashMap<String, u32> = rustc_hash::FxHashMap::default();
 
   // First pass: collect reference directives from fake variables
   // Format: var __dts_ref__ = ["__DTS_REF__", "/// <reference...>"];
@@ -520,18 +502,14 @@ pub fn fake_js_to_dts(
   // Format: var __dts_ambient__ = ["__DTS_AMBIENT__", "declare module 'x' {...}"];
   let ambient_modules = extract_ambient_modules_from_fake_js(fake_js_code);
 
-  // Emit reference directives at the top (no sourcemap for these)
+  // Emit reference directives at the top
   for directive in &reference_directives {
     writeln!(output, "{directive}").ok();
-    current_line += 1;
   }
 
-  // Emit ambient module declarations (no sourcemap for these)
+  // Emit ambient module declarations
   for module_decl in &ambient_modules {
     writeln!(output, "{module_decl}").ok();
-    #[expect(clippy::cast_possible_truncation)]
-    let line_count = module_decl.matches('\n').count() as u32 + 1;
-    current_line += line_count;
   }
 
   // Second pass: extract passthrough comments (line by line)
@@ -541,10 +519,7 @@ pub fn fake_js_to_dts(
       let content = &trimmed[pt_marker + "__DTS_PASSTHROUGH__:".len()..];
       let content = content.strip_suffix("*/").unwrap_or(content).trim();
       let unescaped = unescape_comment(content);
-      #[expect(clippy::cast_possible_truncation)]
-      let line_count = unescaped.matches('\n').count() as u32 + 1;
       writeln!(output, "{unescaped}").ok();
-      current_line += line_count;
     }
   }
 
@@ -556,24 +531,7 @@ pub fn fake_js_to_dts(
       continue;
     }
     if seen_declarations.insert(decl_info.source.clone()) {
-      // Get or create source ID for this file (0 if no file info)
-      let source_id = if decl_info.file.is_empty() {
-        0
-      } else {
-        *source_ids
-          .entry(decl_info.file.clone())
-          .or_insert_with(|| sourcemap_builder.set_source_and_content(&decl_info.file, ""))
-      };
-
-      // Add sourcemap token for each line of the declaration
-      if !decl_info.file.is_empty() {
-        sourcemap_builder.add_token(current_line, 0, decl_info.line, 0, Some(source_id), None);
-      }
-
       writeln!(output, "{}", decl_info.source).ok();
-      #[expect(clippy::cast_possible_truncation)]
-      let line_count = decl_info.source.matches('\n').count() as u32 + 1;
-      current_line += line_count;
     }
   }
 
@@ -586,11 +544,7 @@ pub fn fake_js_to_dts(
     final_code = apply_cjs_default(&final_code);
   }
 
-  // Build the sourcemap (only if we have actual source mappings)
-  let sourcemap =
-    if source_ids.is_empty() { None } else { Some(sourcemap_builder.into_sourcemap()) };
-
-  (final_code, sourcemap)
+  final_code
 }
 
 /// Information about an exported symbol.
@@ -733,12 +687,8 @@ fn extract_all_decl_sources_with_info(code: &str) -> Vec<DeclSourceInfo> {
 
     // Check if next non-whitespace is a quote (source string)
     if let Some(quote_content) = trimmed.strip_prefix('"') {
-      if let Some((source, rest)) = extract_quoted_string_with_rest(quote_content) {
-        // Try to extract file and line info
-        // Format after source: , "file", line];
-        let (file, line) = extract_source_info(rest);
-
-        results.push(DeclSourceInfo { source, file, line });
+      if let Some((source, _rest)) = extract_quoted_string_with_rest(quote_content) {
+        results.push(DeclSourceInfo { source });
       }
     }
 
@@ -746,39 +696,6 @@ fn extract_all_decl_sources_with_info(code: &str) -> Vec<DeclSourceInfo> {
   }
 
   results
-}
-
-/// Extract source file and line from the rest of a fake JS array.
-/// Input: `, "file", 42];` or similar
-fn extract_source_info(rest: &str) -> (String, u32) {
-  let trimmed = rest.trim_start();
-
-  // Expect: , "file", line
-  let Some(after_comma) = trimmed.strip_prefix(',') else {
-    return (String::new(), 0);
-  };
-
-  let trimmed = after_comma.trim_start();
-  let Some(quote_content) = trimmed.strip_prefix('"') else {
-    return (String::new(), 0);
-  };
-
-  let Some((file, rest)) = extract_quoted_string_with_rest(quote_content) else {
-    return (String::new(), 0);
-  };
-
-  // Extract line number
-  let trimmed = rest.trim_start();
-  let Some(after_comma) = trimmed.strip_prefix(',') else {
-    return (file, 0);
-  };
-
-  let trimmed = after_comma.trim_start();
-  // Parse digits until non-digit
-  let line_str: String = trimmed.chars().take_while(char::is_ascii_digit).collect();
-  let line = line_str.parse().unwrap_or(0);
-
-  (file, line)
 }
 
 /// Extract a quoted string, handling escape sequences.
@@ -985,7 +902,7 @@ mod tests {
     let dts = "export declare const x: number;\n";
     let counter = AtomicU32::new(0);
     let fake_js = dts_to_fake_js(dts, "test.d.ts", &counter).unwrap();
-    let (reconstructed, _map) = fake_js_to_dts(&fake_js, "test.d.ts", false);
+    let reconstructed = fake_js_to_dts(&fake_js, false);
 
     assert!(reconstructed.contains("export declare const x: number;"));
   }
@@ -1025,7 +942,7 @@ export interface Foo {
     assert!(fake_js.contains("reference path=\\\"./global.d.ts\\\""));
 
     // Roundtrip should preserve reference directives at the top
-    let (reconstructed, _map) = fake_js_to_dts(&fake_js, "test.d.ts", false);
+    let reconstructed = fake_js_to_dts(&fake_js, false);
     assert!(reconstructed.contains("/// <reference types=\"node\""));
     assert!(reconstructed.contains("/// <reference path=\"./global.d.ts\""));
   }
@@ -1049,7 +966,7 @@ export interface Foo {
     assert!(fake_js.contains("declare global"));
 
     // Roundtrip should preserve declare global
-    let (reconstructed, _map) = fake_js_to_dts(&fake_js, "test.d.ts", false);
+    let reconstructed = fake_js_to_dts(&fake_js, false);
     assert!(reconstructed.contains("declare global"));
     assert!(reconstructed.contains("interface Window"));
     assert!(reconstructed.contains("myProperty: string"));
@@ -1057,10 +974,7 @@ export interface Foo {
 
   #[test]
   fn test_apply_cjs_default() {
-    assert_eq!(
-      apply_cjs_default("export { Foo as default };"),
-      "export = Foo;"
-    );
+    assert_eq!(apply_cjs_default("export { Foo as default };"), "export = Foo;");
     // Should not convert when multiple specifiers
     let multi = "export { Foo, Bar as default };";
     assert_eq!(apply_cjs_default(multi), multi);

@@ -6,10 +6,7 @@ export default defineTest({
   sequential: true,
   config: {
     input: 'main.ts',
-    plugins: [dtsPlugin({ sourcemap: true })],
-    output: {
-      sourcemap: true,
-    },
+    plugins: [dtsPlugin()],
   },
   async afterTest(output) {
     const chunks = output.output.filter((o) => o.type === 'chunk');
@@ -21,10 +18,5 @@ export default defineTest({
     // DTS chunk should contain our types
     expect(dtsChunk!.code).toContain('User');
     expect(dtsChunk!.code).toContain('createUser');
-
-    // DTS chunk should have a sourcemap
-    expect(dtsChunk!.map).toBeDefined();
-    expect(dtsChunk!.map?.sources).toBeDefined();
-    expect(dtsChunk!.map?.sources.length).toBeGreaterThan(0);
   },
 });

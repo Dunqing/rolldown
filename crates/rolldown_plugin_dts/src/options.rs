@@ -11,12 +11,9 @@ pub struct DtsCompilerOptions {
 
 /// Options for the DTS plugin.
 #[derive(Debug, Clone, Default)]
-#[expect(clippy::struct_excessive_bools)]
 pub struct DtsPluginOptions {
   /// Whether to emit only `.d.ts` files (remove JS chunks from output).
   pub emit_dts_only: bool,
-  /// Whether to generate source maps for declaration files.
-  pub sourcemap: bool,
   /// If `true`, convert a single `export { x as default }` to `export = x`
   /// in the output for CommonJS compatibility.
   pub cjs_default: bool,

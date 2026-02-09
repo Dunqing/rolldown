@@ -1,4 +1,4 @@
-// index.d.d.ts.d.ts
+// index.d.d.ts
 export type Color = "red" | "blue";
 export type Quantity = "one" | "two";
 export type VerticalAlignment = "top" | "middle" | "bottom";

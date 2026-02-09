@@ -1,4 +1,4 @@
-// common.d.d.ts.d.ts
+// common.d.d.ts
 export interface A {}
 export interface B {}
 

@@ -1,4 +1,4 @@
-// index.d.d.ts.d.ts
+// index.d.d.ts
 export type Getters<T> = {
   [K in keyof T as `get${Capitalize<string & K>}`]: () => T[K];
 };

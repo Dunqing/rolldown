@@ -1,4 +1,4 @@
-// index.d.d.ts.d.ts
+// index.d.d.ts
 export declare const foo: number
 export declare const bar: typeof mod.a
 type SomeType<T> = T

@@ -1,4 +1,4 @@
-// index.d.d.ts.d.ts
+// index.d.d.ts
 declare global {
   namespace Named.Core {
     export { A, B };

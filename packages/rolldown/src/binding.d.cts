@@ -1818,8 +1818,6 @@ export interface BindingDtsCompilerOptions {
 export interface BindingDtsPluginConfig {
   /** Whether to emit only `.d.ts` files (remove JS chunks from output). */
   emitDtsOnly?: boolean
-  /** Whether to generate source maps for declaration files. */
-  sourcemap?: boolean
   /**
    * If `true`, convert a single `export { x as default }` to `export = x`
    * in the output for CommonJS compatibility.

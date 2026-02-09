@@ -1,4 +1,4 @@
-// index.d.d.ts.d.ts
+// index.d.d.ts
 type Props = {
   onClick: MouseEventHandler<HTMLButtonElement>;
 };

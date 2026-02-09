@@ -13,8 +13,6 @@ pub struct BindingDtsCompilerOptions {
 pub struct BindingDtsPluginConfig {
   /// Whether to emit only `.d.ts` files (remove JS chunks from output).
   pub emit_dts_only: Option<bool>,
-  /// Whether to generate source maps for declaration files.
-  pub sourcemap: Option<bool>,
   /// If `true`, convert a single `export { x as default }` to `export = x`
   /// in the output for CommonJS compatibility.
   pub cjs_default: Option<bool>,
@@ -30,7 +28,6 @@ impl From<BindingDtsPluginConfig> for DtsPluginOptions {
     let compiler_options = config.compiler_options.unwrap_or_default();
     Self {
       emit_dts_only: config.emit_dts_only.unwrap_or_default(),
-      sourcemap: config.sourcemap.unwrap_or_default(),
       cjs_default: config.cjs_default.unwrap_or_default(),
       side_effects: config.side_effects.unwrap_or_default(),
       compiler_options: DtsCompilerOptions {

@@ -1,4 +1,4 @@
-// index.d.d.ts.d.ts
+// index.d.d.ts
 export interface Foo {
   a: string;
   b: Array<number>;

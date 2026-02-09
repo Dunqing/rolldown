@@ -1,7 +1,7 @@
-// common.d.d.ts.d.ts
+// common.d.d.ts
 export interface B {}
 
-// main-a.d.d.ts.d.ts
+// main-a.d.d.ts
 /// <reference types="react" />
 export const A = 2;
 declare type JSXElements = keyof JSX.IntrinsicElements;

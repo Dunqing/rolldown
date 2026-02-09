@@ -1,4 +1,4 @@
-// index.d.d.ts.d.ts
+// index.d.d.ts
 export default interface MemberTypes {}
 export default interface TypeInfo {}
 export default abstract class MemberInfo {

@@ -1,4 +1,4 @@
-// index.d.d.ts.d.ts
+// index.d.d.ts
 export declare function fn(arg: string): string;
 export declare namespace fn {
   var staticProp: string;

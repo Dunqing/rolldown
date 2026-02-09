@@ -1,4 +1,4 @@
-// index.d.d.ts.d.ts
+// index.d.d.ts
 type Client = any
 export type Config1<Client> = Client
 export type Client = any

@@ -1,4 +1,4 @@
-// index.d.d.ts.d.ts
+// index.d.d.ts
 export declare const sLit = "";
 export declare const nLit = 0;
 export declare const aLit: never[];

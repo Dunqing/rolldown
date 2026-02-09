@@ -1,4 +1,4 @@
-// index.d.d.ts.d.ts
+// index.d.d.ts
 export interface ShowT {}
 export interface HideT {}
 export class SpecializedComponent extends SomeComponent {

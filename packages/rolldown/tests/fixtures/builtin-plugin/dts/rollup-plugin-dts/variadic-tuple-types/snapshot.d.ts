@@ -1,4 +1,4 @@
-// index.d.d.ts.d.ts
+// index.d.d.ts
 type Strings = [string, string];
 type Numbers = [number, number];
 export type StrStrNumNumBool = [...Strings, ...Numbers, boolean];

@@ -1,2 +1,2 @@
-// index.d.d.ts.d.ts
+// index.d.d.ts
 export type T = typeof undefined | typeof NaN

@@ -1,4 +1,4 @@
-// index.d.d.ts.d.ts
+// index.d.d.ts
 export interface A {}
 export declare function B(): void;
 export declare class C {}

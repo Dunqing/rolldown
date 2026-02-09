@@ -1,4 +1,4 @@
-// index.d.d.ts.d.ts
+// index.d.d.ts
 export interface I {
   (arg: string): string;
   staticProp: string;

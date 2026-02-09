@@ -1,4 +1,4 @@
-// index.d.d.ts.d.ts
+// index.d.d.ts
 interface AbstractReturnValue {}
 interface AbstractMember {}
 declare abstract class AbstractClass {

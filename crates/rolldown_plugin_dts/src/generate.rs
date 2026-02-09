@@ -11,9 +11,9 @@ use oxc::{
 use rolldown_common::{EmittedChunk, ModuleType, Output, side_effects::HookSideEffects};
 use rolldown_error::{BatchedBuildDiagnostic, BuildDiagnostic, EventKind, Severity};
 use rolldown_plugin::{
-  HookLoadOutput, HookTransformOutput, HookUsage, Plugin, PluginHookMeta, PluginOrder,
+  HookLoadOutput, HookRenderChunkArgs, HookRenderChunkOutput, HookTransformOutput, HookUsage,
+  Plugin, PluginHookMeta, PluginOrder,
 };
-use rolldown_sourcemap::SourceMap;
 
 use crate::fake_js;
 use crate::options::DtsPluginOptions;
@@ -101,12 +101,12 @@ impl DtsPlugin {
   }
 
   /// Generate `.d.ts` code from TypeScript source using Oxc isolated declarations.
-  /// Returns (code, sourcemap) where sourcemap is present if `self.options.sourcemap` is true.
+  /// Always produces sourcemaps so rolldown can compose them in the sourcemap chain.
   fn generate_dts(
     &self,
     source_id: &str,
     code: &str,
-  ) -> Result<(String, Option<SourceMap>), BatchedBuildDiagnostic> {
+  ) -> Result<(String, Option<rolldown_sourcemap::SourceMap>), BatchedBuildDiagnostic> {
     let allocator = oxc::allocator::Allocator::new();
     let source_type = oxc::span::SourceType::from_path(source_id).unwrap_or_default();
     let parser_ret = oxc::parser::Parser::new(&allocator, code, source_type).parse();
@@ -123,9 +123,7 @@ impl DtsPlugin {
 
     let ret = IsolatedDeclarations::new(
       &allocator,
-      IsolatedDeclarationsOptions {
-        strip_internal: self.options.compiler_options.strip_internal,
-      },
+      IsolatedDeclarationsOptions { strip_internal: self.options.compiler_options.strip_internal },
     )
     .build(&parser_ret.program);
 
@@ -139,16 +137,12 @@ impl DtsPlugin {
       )));
     }
 
-    let codegen_ret = if self.options.sourcemap {
-      Codegen::new()
-        .with_options(CodegenOptions {
-          source_map_path: Some(PathBuf::from(source_id)),
-          ..CodegenOptions::default()
-        })
-        .build(&ret.program)
-    } else {
-      Codegen::new().build(&ret.program)
-    };
+    let codegen_ret = Codegen::new()
+      .with_options(CodegenOptions {
+        source_map_path: Some(PathBuf::from(source_id)),
+        ..CodegenOptions::default()
+      })
+      .build(&ret.program);
 
     Ok((codegen_ret.code, codegen_ret.map))
   }
@@ -426,44 +420,51 @@ impl Plugin for DtsPlugin {
     Ok(None)
   }
 
-  /// Convert bundled fake JS back to .d.ts declarations and rename output files.
+  /// Convert bundled fake JS back to .d.ts declarations.
+  /// Rolldown composes the sourcemap chain automatically.
+  async fn render_chunk(
+    &self,
+    _ctx: &rolldown_plugin::PluginContext,
+    args: &HookRenderChunkArgs<'_>,
+  ) -> rolldown_plugin::HookRenderChunkReturn {
+    let is_dts_chunk = args.code.contains("__DTS_PASSTHROUGH__:") || is_fake_dts_var(&args.code);
+
+    if !is_dts_chunk {
+      return Ok(None);
+    }
+
+    let dts_code = fake_js::fake_js_to_dts(&args.code, self.options.cjs_default);
+
+    Ok(Some(HookRenderChunkOutput { code: dts_code, map: None }))
+  }
+
+  /// Rename output files to .d.ts and optionally remove JS chunks.
   async fn generate_bundle(
     &self,
     _ctx: &rolldown_plugin::PluginContext,
     args: &mut rolldown_plugin::HookGenerateBundleArgs<'_>,
   ) -> rolldown_plugin::HookNoopReturn {
-    // Process each chunk to convert fake JS to DTS and rename files
+    // Rename DTS chunks from .js to .d.ts
     for output in args.bundle.iter_mut() {
       if let Output::Chunk(chunk_arc) = output {
-        // Check if this chunk contains DTS content (fake JS from our transform)
-        // Detection: look for passthrough markers or our fake var format
-        let is_dts_chunk =
-          chunk_arc.code.contains("__DTS_PASSTHROUGH__:") || is_fake_dts_var(&chunk_arc.code);
+        // Detect DTS chunks by checking if code looks like declarations (not fake JS)
+        let code = &chunk_arc.code;
+        let looks_like_dts = code.contains("declare ")
+          || code.contains("export interface")
+          || code.contains("export type")
+          || code.contains("/// <reference");
 
-        if is_dts_chunk {
-          // Clone the chunk's data, modify it, and replace the Arc
+        if looks_like_dts && !is_dts(&chunk_arc.filename) {
           let chunk_ref: &rolldown_common::OutputChunk = chunk_arc;
           let mut chunk = chunk_ref.clone();
-
-          // Rename the file to .d.ts extension
           let new_filename = convert_js_to_dts_filename(&chunk.filename);
 
-          // Convert fake JS back to DTS with sourcemap
-          let (dts_code, dts_map) =
-            fake_js::fake_js_to_dts(&chunk.code, &new_filename, self.options.cjs_default);
-          chunk.code = dts_code;
-          chunk.filename = ArcStr::from(new_filename.clone());
-
-          // Set the sourcemap if enabled
-          if self.options.sourcemap {
-            chunk.map = dts_map;
+          // Update sourcemap filename if a sourcemap exists
+          if chunk.map.is_some() {
             chunk.sourcemap_filename = Some(format!("{new_filename}.map"));
-          } else {
-            chunk.map = None;
-            chunk.sourcemap_filename = None;
           }
 
-          // Replace the Arc with the modified chunk
+          chunk.filename = ArcStr::from(new_filename);
           *output = Output::Chunk(std::sync::Arc::new(chunk));
         }
       }
@@ -480,6 +481,10 @@ impl Plugin for DtsPlugin {
   }
 
   fn register_hook_usage(&self) -> HookUsage {
-    HookUsage::Transform | HookUsage::ResolveId | HookUsage::Load | HookUsage::GenerateBundle
+    HookUsage::Transform
+      | HookUsage::ResolveId
+      | HookUsage::Load
+      | HookUsage::RenderChunk
+      | HookUsage::GenerateBundle
   }
 }

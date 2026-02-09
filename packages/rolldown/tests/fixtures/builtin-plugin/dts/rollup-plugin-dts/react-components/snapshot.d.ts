@@ -1,4 +1,4 @@
-// index.d.d.ts.d.ts
+// index.d.d.ts
 export interface MyComponentProps extends React.HtmlHTMLAttributes<HTMLDivElement> {
   foo: string;
 }

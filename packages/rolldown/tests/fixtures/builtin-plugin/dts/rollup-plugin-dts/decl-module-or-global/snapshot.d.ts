@@ -1,4 +1,4 @@
-// index.d.d.ts.d.ts
+// index.d.d.ts
 declare module "babel__core" {
   var fn1: any;
 }

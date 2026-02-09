@@ -1,4 +1,4 @@
-// index.d.d.ts.d.ts
+// index.d.d.ts
 export enum E {}
 export interface Foo {
   e: E;

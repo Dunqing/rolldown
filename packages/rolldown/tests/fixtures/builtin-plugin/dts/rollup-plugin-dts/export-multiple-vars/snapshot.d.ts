@@ -1,4 +1,4 @@
-// index.d.d.ts.d.ts
+// index.d.d.ts
 export declare type In = { a: string };
 export declare type Out = { b: number };
 export declare const config: {

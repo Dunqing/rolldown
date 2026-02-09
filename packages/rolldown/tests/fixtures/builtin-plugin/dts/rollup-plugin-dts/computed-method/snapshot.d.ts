@@ -1,4 +1,4 @@
-// index.d.d.ts.d.ts
+// index.d.d.ts
 declare class Test {
   [inspect.custom](): string;
   [b](): string;

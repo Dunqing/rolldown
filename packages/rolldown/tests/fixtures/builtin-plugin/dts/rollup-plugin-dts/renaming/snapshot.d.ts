@@ -1,4 +1,4 @@
-// index.d.d.ts.d.ts
+// index.d.d.ts
 interface A {}
 interface C {}
 interface D {}
