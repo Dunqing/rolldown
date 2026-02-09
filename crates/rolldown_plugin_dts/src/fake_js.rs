@@ -31,7 +31,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use anyhow::Result;
 use oxc::allocator::Allocator;
 use oxc::ast::ast::{
-  BindingPattern, Declaration, ImportDeclarationSpecifier, ImportOrExportKind, Statement,
+  BindingPattern, Declaration, ImportDeclarationSpecifier, Statement,
   TSModuleDeclarationName, TSModuleReference, TSTypeName, TSTypeQuery, TSTypeQueryExprName,
   TSTypeReference,
 };
@@ -234,7 +234,6 @@ pub fn dts_to_fake_js(dts_code: &str, filename: &str, id_counter: &AtomicU32) ->
             exports.push(ExportInfo {
               local_name: local.to_string(),
               exported_name: exported.to_string(),
-              is_type: matches!(spec.export_kind, ImportOrExportKind::Type),
             });
           }
         }
@@ -363,26 +362,26 @@ fn handle_exported_declaration(
       let name = d.id.name.as_str();
       let id = id_counter.fetch_add(1, Ordering::Relaxed);
       write_fake_var(output, name, id, &deps, original_source, filename, source_line);
-      exports.push(ExportInfo::named(name, true));
+      exports.push(ExportInfo::named(name));
     }
     Declaration::TSInterfaceDeclaration(d) => {
       let name = d.id.name.as_str();
       let id = id_counter.fetch_add(1, Ordering::Relaxed);
       write_fake_var(output, name, id, &deps, original_source, filename, source_line);
-      exports.push(ExportInfo::named(name, true));
+      exports.push(ExportInfo::named(name));
     }
     Declaration::TSEnumDeclaration(d) => {
       let name = d.id.name.as_str();
       let id = id_counter.fetch_add(1, Ordering::Relaxed);
       write_fake_var(output, name, id, &deps, original_source, filename, source_line);
-      exports.push(ExportInfo::named(name, false));
+      exports.push(ExportInfo::named(name));
     }
     Declaration::ClassDeclaration(d) => {
       if let Some(ident) = &d.id {
         let name = ident.name.as_str();
         let id = id_counter.fetch_add(1, Ordering::Relaxed);
         write_fake_var(output, name, id, &deps, original_source, filename, source_line);
-        exports.push(ExportInfo::named(name, false));
+        exports.push(ExportInfo::named(name));
       }
     }
     Declaration::VariableDeclaration(d) => {
@@ -391,7 +390,7 @@ fn handle_exported_declaration(
           let name = ident.name.as_str();
           let id = id_counter.fetch_add(1, Ordering::Relaxed);
           write_fake_var(output, name, id, &deps, original_source, filename, source_line);
-          exports.push(ExportInfo::named(name, false));
+          exports.push(ExportInfo::named(name));
         }
       }
     }
@@ -400,7 +399,7 @@ fn handle_exported_declaration(
         let name = ident.name.as_str();
         let id = id_counter.fetch_add(1, Ordering::Relaxed);
         write_fake_var(output, name, id, &deps, original_source, filename, source_line);
-        exports.push(ExportInfo::named(name, false));
+        exports.push(ExportInfo::named(name));
       }
     }
     Declaration::TSModuleDeclaration(d) => {
@@ -409,11 +408,7 @@ fn handle_exported_declaration(
           let name = ident.name.as_str().to_string();
           let id = id_counter.fetch_add(1, Ordering::Relaxed);
           write_fake_var(output, &name, id, &deps, original_source, filename, source_line);
-          exports.push(ExportInfo {
-            local_name: name.clone(),
-            exported_name: name,
-            is_type: false,
-          });
+          exports.push(ExportInfo { local_name: name.clone(), exported_name: name });
         }
         TSModuleDeclarationName::StringLiteral(_) => {
           // Ambient external module declarations should be passed through
@@ -474,13 +469,6 @@ fn write_import_specifiers(
   writeln!(output, "{import_js}").ok();
 }
 
-/// Information about a declaration extracted from fake JS.
-#[derive(Debug, Clone)]
-struct DeclSourceInfo {
-  /// The original declaration source code.
-  source: String,
-}
-
 /// Convert bundled fake JS back to valid `.d.ts` declarations.
 ///
 /// When `cjs_default` is true, a single `export { x as default }` will be
@@ -491,16 +479,14 @@ pub fn fake_js_to_dts(fake_js_code: &str, cjs_default: bool) -> String {
   let mut seen_declarations: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
 
   // First pass: collect reference directives from fake variables
-  // Format: var __dts_ref__ = ["__DTS_REF__", "/// <reference...>"];
-  for directive in extract_reference_directives_from_fake_js(fake_js_code) {
+  for directive in extract_marker_values(fake_js_code, "__DTS_REF__") {
     if !reference_directives.contains(&directive) {
       reference_directives.push(directive);
     }
   }
 
   // Collect ambient module declarations
-  // Format: var __dts_ambient__ = ["__DTS_AMBIENT__", "declare module 'x' {...}"];
-  let ambient_modules = extract_ambient_modules_from_fake_js(fake_js_code);
+  let ambient_modules = extract_marker_values(fake_js_code, "__DTS_AMBIENT__");
 
   // Emit reference directives at the top
   for directive in &reference_directives {
@@ -523,15 +509,15 @@ pub fn fake_js_to_dts(fake_js_code: &str, cjs_default: bool) -> String {
     }
   }
 
-  // Third pass: extract declaration sources from fake JS arrays with source info
+  // Third pass: extract declaration sources from fake JS arrays
   // Format: [id, () => deps, ["name"], "source", "file", line]
-  for decl_info in extract_all_decl_sources_with_info(fake_js_code) {
+  for source in extract_all_decl_sources(fake_js_code) {
     // Skip reference directives (already handled above)
-    if decl_info.source.starts_with("/// <reference") {
+    if source.starts_with("/// <reference") {
       continue;
     }
-    if seen_declarations.insert(decl_info.source.clone()) {
-      writeln!(output, "{}", decl_info.source).ok();
+    if seen_declarations.insert(source.clone()) {
+      writeln!(output, "{source}").ok();
     }
   }
 
@@ -552,13 +538,11 @@ pub fn fake_js_to_dts(fake_js_code: &str, cjs_default: bool) -> String {
 struct ExportInfo {
   local_name: String,
   exported_name: String,
-  #[expect(dead_code)]
-  is_type: bool,
 }
 
 impl ExportInfo {
-  fn named(name: &str, is_type: bool) -> Self {
-    Self { local_name: name.to_string(), exported_name: name.to_string(), is_type }
+  fn named(name: &str) -> Self {
+    Self { local_name: name.to_string(), exported_name: name.to_string() }
   }
 }
 
@@ -621,58 +605,33 @@ fn unescape_js_string(s: &str) -> String {
   result
 }
 
-/// Extract reference directives from fake variables.
-/// Format: `var __dts_ref__ = ["__DTS_REF__", "/// <reference...>"];`
-fn extract_reference_directives_from_fake_js(code: &str) -> Vec<String> {
-  let mut directives = Vec::new();
-  let marker = "[\"__DTS_REF__\",";
+/// Extract string values from fake JS marker arrays.
+/// Format: `["MARKER", "value"]` - extracts the quoted value after each marker occurrence.
+fn extract_marker_values(code: &str, marker_tag: &str) -> Vec<String> {
+  let mut values = Vec::new();
+  let marker = format!("[\"{marker_tag}\",");
 
   let mut search_start = 0;
-  while let Some(pos) = code[search_start..].find(marker) {
+  while let Some(pos) = code[search_start..].find(&marker) {
     let abs_pos = search_start + pos;
     let after_marker = &code[abs_pos + marker.len()..];
     let trimmed = after_marker.trim_start();
 
     if let Some(quote_content) = trimmed.strip_prefix('"') {
       if let Some(source) = extract_quoted_string(quote_content) {
-        directives.push(source);
+        values.push(source);
       }
     }
 
     search_start = abs_pos + marker.len();
   }
 
-  directives
+  values
 }
 
-/// Extract ambient module declarations from fake variables.
-/// Format: `var __dts_ambient__ = ["__DTS_AMBIENT__", "declare module 'x' {...}"];`
-fn extract_ambient_modules_from_fake_js(code: &str) -> Vec<String> {
-  let mut modules = Vec::new();
-  let marker = "[\"__DTS_AMBIENT__\",";
-
-  let mut search_start = 0;
-  while let Some(pos) = code[search_start..].find(marker) {
-    let abs_pos = search_start + pos;
-    let after_marker = &code[abs_pos + marker.len()..];
-    let trimmed = after_marker.trim_start();
-
-    if let Some(quote_content) = trimmed.strip_prefix('"') {
-      if let Some(source) = extract_quoted_string(quote_content) {
-        modules.push(source);
-      }
-    }
-
-    search_start = abs_pos + marker.len();
-  }
-
-  modules
-}
-
-/// Extract all declaration sources with source position info from fake JS code.
+/// Extract all declaration source strings from fake JS code.
 /// Format: `var NAME = [id, () => deps, ["name"], "source", "file", line];`
-/// Falls back to default values for legacy format without source info.
-fn extract_all_decl_sources_with_info(code: &str) -> Vec<DeclSourceInfo> {
+fn extract_all_decl_sources(code: &str) -> Vec<String> {
   let mut results = Vec::new();
 
   // Find all patterns like: ], followed by whitespace/newline, then "source"
@@ -688,7 +647,7 @@ fn extract_all_decl_sources_with_info(code: &str) -> Vec<DeclSourceInfo> {
     // Check if next non-whitespace is a quote (source string)
     if let Some(quote_content) = trimmed.strip_prefix('"') {
       if let Some((source, _rest)) = extract_quoted_string_with_rest(quote_content) {
-        results.push(DeclSourceInfo { source });
+        results.push(source);
       }
     }
 

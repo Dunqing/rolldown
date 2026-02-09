@@ -65,9 +65,6 @@ struct DtsModule {
   code: String,
   /// Original source file path.
   source_id: String,
-  /// Whether this is an entry module.
-  #[expect(dead_code)]
-  is_entry: bool,
 }
 
 /// The main DTS plugin that generates and bundles `.d.ts` declaration files.
@@ -169,11 +166,7 @@ impl Plugin for DtsPlugin {
 
       // Store the source with BOTH the virtual ID and source path as keys
       // This ensures we can find it regardless of how it's looked up
-      let module = DtsModule {
-        code: args.code.clone(),
-        source_id: id.to_string(),
-        is_entry: true, // TODO: detect actual entry status
-      };
+      let module = DtsModule { code: args.code.clone(), source_id: id.to_string() };
       self.dts_map.insert(virtual_id.clone(), module.clone());
       self.dts_map.insert(id.to_string(), module);
 
@@ -382,9 +375,9 @@ impl Plugin for DtsPlugin {
     let source_path = dts_to_source(dts_path);
 
     // Try to find captured source in dts_map first
-    if let Some(module) =
-      self.dts_map.get(id).or_else(|| self.dts_map.get(&source_path)).map(|entry| entry.clone())
-    {
+    let module =
+      self.dts_map.get(id).or_else(|| self.dts_map.get(&source_path)).as_deref().cloned();
+    if let Some(module) = module {
       let (dts_code, map) = self.generate_dts(&module.source_id, &module.code)?;
       return Ok(Some(HookLoadOutput {
         code: ArcStr::from(dts_code),
