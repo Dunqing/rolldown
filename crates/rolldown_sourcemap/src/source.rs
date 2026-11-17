@@ -37,47 +37,38 @@ impl Source for String {
   }
 }
 
-/// Content with the sourcemap that maps it. The content may be borrowed (`&str`), so content that
-/// is shared elsewhere can still give its sourcemap to a `SourceJoiner` by value.
 #[derive(Debug)]
-pub struct SourceMapSource<C = String> {
-  content: C,
+pub struct SourceMapSource {
+  content: String,
   sourcemap: Option<SourceMap>,
   pre_computed_lines_count: Option<u32>,
 }
 
-impl<C: AsRef<str>> SourceMapSource<C> {
-  pub fn new(content: C, sourcemap: SourceMap) -> Self {
+impl SourceMapSource {
+  pub fn new(content: String, sourcemap: SourceMap) -> Self {
     Self { content, sourcemap: Some(sourcemap), pre_computed_lines_count: None }
   }
 
   #[must_use]
   pub fn with_pre_compute_sourcemap_data(mut self, pre_compute: bool) -> Self {
     if pre_compute {
-      self.pre_computed_lines_count = Some(lines_count(self.content.as_ref()));
+      self.pre_computed_lines_count = Some(lines_count(&self.content));
     }
-    self
-  }
-
-  /// Uses a line count of the content that was computed earlier, e.g. in parallel.
-  #[must_use]
-  pub fn with_lines_count(mut self, lines_count: u32) -> Self {
-    self.pre_computed_lines_count = Some(lines_count);
     self
   }
 }
 
-impl<C: AsRef<str>> Source for SourceMapSource<C> {
+impl Source for SourceMapSource {
   fn sourcemap(&self) -> Option<&SourceMap> {
     self.sourcemap.as_ref()
   }
 
   fn content(&self) -> &str {
-    self.content.as_ref()
+    &self.content
   }
 
   fn lines_count(&self) -> u32 {
-    self.pre_computed_lines_count.unwrap_or_else(|| lines_count(self.content.as_ref()))
+    self.pre_computed_lines_count.unwrap_or_else(|| lines_count(&self.content))
   }
 
   fn take_sourcemap(&mut self) -> Option<SourceMap> {

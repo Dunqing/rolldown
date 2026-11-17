@@ -5,23 +5,71 @@ use rolldown_common::{
   SourcemapChainElement,
 };
 use rolldown_error::BuildDiagnostic;
-use rolldown_sourcemap::{Source, SourceMap, collapse_sourcemaps_traced, empty_sourcemap};
+use rolldown_sourcemap::{
+  Source, SourceJoiner, SourceMap, collapse_sourcemaps_traced, empty_sourcemap,
+};
 use rolldown_utils::concat_string;
 
 pub struct RenderEcmaModuleOutput {
-  /// The rendered pieces of the module, shared with its `RenderedModule`. They hold no sourcemap.
+  /// The rendered sources of the module, shared with its `RenderedModule`. The module code is
+  /// the last one. They hold no sourcemap: see `append_module_sources`.
   pub sources: Option<Arc<[Box<dyn Source + Send + Sync>]>>,
-  /// The sourcemap of the last piece, the module code.
   pub sourcemap: Option<ModuleSourcemap>,
   pub warnings: Vec<BuildDiagnostic>,
 }
 
-/// A module's final sourcemap. It is kept out of the shared `sources`, so the chunk can move it
-/// into its `SourceJoiner` instead of copying it, and it is freed once the chunk is joined.
+/// The final sourcemap of a module's code. It is kept out of the shared `sources`, so that the
+/// chunk can move it into its `SourceJoiner` instead of copying it.
 pub struct ModuleSourcemap {
-  pub map: SourceMap,
+  map: SourceMap,
   /// Newlines in the module code, counted here (in parallel) rather than while joining the chunk.
-  pub code_lines_count: u32,
+  code_lines_count: u32,
+}
+
+/// Appends a module's rendered `sources` to `source_joiner`, and moves its `sourcemap` in with
+/// the module code.
+pub fn append_module_sources<'a>(
+  source_joiner: &mut SourceJoiner<'a>,
+  sources: &'a [Box<dyn Source + Send + Sync>],
+  sourcemap: Option<ModuleSourcemap>,
+) {
+  let Some((code, other_sources)) = sources.split_last() else { return };
+  for source in other_sources {
+    source_joiner.append_source(source);
+  }
+  match sourcemap {
+    Some(ModuleSourcemap { map, code_lines_count }) => source_joiner.append_source(MappedCode {
+      code: code.as_ref().content(),
+      sourcemap: Some(map),
+      lines_count: code_lines_count,
+    }),
+    None => source_joiner.append_source(code),
+  }
+}
+
+/// Module code borrowed from the shared sources, with the sourcemap it gives to the joiner.
+struct MappedCode<'a> {
+  code: &'a str,
+  sourcemap: Option<SourceMap>,
+  lines_count: u32,
+}
+
+impl Source for MappedCode<'_> {
+  fn sourcemap(&self) -> Option<&SourceMap> {
+    self.sourcemap.as_ref()
+  }
+
+  fn take_sourcemap(&mut self) -> Option<SourceMap> {
+    self.sourcemap.take()
+  }
+
+  fn content(&self) -> &str {
+    self.code
+  }
+
+  fn lines_count(&self) -> u32 {
+    self.lines_count
+  }
 }
 
 pub fn render_ecma_module(
