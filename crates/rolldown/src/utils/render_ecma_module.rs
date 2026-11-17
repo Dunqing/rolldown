@@ -5,14 +5,23 @@ use rolldown_common::{
   SourcemapChainElement,
 };
 use rolldown_error::BuildDiagnostic;
-use rolldown_sourcemap::{
-  Source, SourceMap, SourceMapSource, collapse_sourcemaps_traced, empty_sourcemap,
-};
+use rolldown_sourcemap::{Source, SourceMap, collapse_sourcemaps_traced, empty_sourcemap};
 use rolldown_utils::concat_string;
 
 pub struct RenderEcmaModuleOutput {
+  /// The rendered pieces of the module, shared with its `RenderedModule`. They hold no sourcemap.
   pub sources: Option<Arc<[Box<dyn Source + Send + Sync>]>>,
+  /// The sourcemap of the last piece, the module code.
+  pub sourcemap: Option<ModuleSourcemap>,
   pub warnings: Vec<BuildDiagnostic>,
+}
+
+/// A module's final sourcemap. It is kept out of the shared `sources`, so the chunk can move it
+/// into its `SourceJoiner` instead of copying it, and it is freed once the chunk is joined.
+pub struct ModuleSourcemap {
+  pub map: SourceMap,
+  /// Newlines in the module code, counted here (in parallel) rather than while joining the chunk.
+  pub code_lines_count: u32,
 }
 
 pub fn render_ecma_module(
@@ -21,7 +30,7 @@ pub fn render_ecma_module(
   render_output: ModuleRenderOutput,
 ) -> RenderEcmaModuleOutput {
   if render_output.code.is_empty() {
-    return RenderEcmaModuleOutput { sources: None, warnings: vec![] };
+    return RenderEcmaModuleOutput { sources: None, sourcemap: None, warnings: vec![] };
   }
   let mut sources: Vec<Box<dyn rolldown_sourcemap::Source + Send + Sync>> = Vec::with_capacity(6);
   // Mark only where a module starts, like esbuild and bun.
@@ -39,25 +48,24 @@ pub fn render_ecma_module(
   // If here no extra sourcemap need remapping, we using it as final module sourcemap.
   // So here make sure using correct `source_name` and `source_content.
 
-  if enable_sourcemap {
-    if let Some(sourcemap) = collapse_module_sourcemap(
+  let sourcemap = if enable_sourcemap {
+    collapse_module_sourcemap(
       &module.sourcemap_chain,
       render_output.map,
       module.id.as_str(),
       &mut warnings,
-    ) {
-      sources.push(Box::new(
-        SourceMapSource::new(render_output.code, sourcemap)
-          .with_pre_compute_sourcemap_data(options.is_sourcemap_enabled()),
-      ));
-    } else {
-      sources.push(Box::new(render_output.code));
-    }
+    )
+    .map(|map| ModuleSourcemap { map, code_lines_count: render_output.code.lines_count() })
   } else {
-    sources.push(Box::new(render_output.code));
-  }
+    None
+  };
+  sources.push(Box::new(render_output.code));
 
-  RenderEcmaModuleOutput { sources: Some(Arc::from(sources.into_boxed_slice())), warnings }
+  RenderEcmaModuleOutput {
+    sources: Some(Arc::from(sources.into_boxed_slice())),
+    sourcemap,
+    warnings,
+  }
 }
 
 /// Collapses a module's `sourcemap_chain` together with the oxc codegen map
